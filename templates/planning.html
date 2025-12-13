@@ -4,91 +4,62 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Planning - {{ monday }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
     <style>
-      :root { color-scheme: light; }
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; background: #fafafa; }
-      .wrap { max-width: 1100px; margin: 0 auto; }
-      .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-      h1 { font-size: 20px; margin: 0; }
-      a { text-decoration: none; }
-      a:hover { text-decoration: underline; }
-
-      .grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; align-items: start; }
-      .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 14px; box-shadow: 0 1px 0 rgba(0,0,0,0.04); background: #fff; }
-      .sub { color: #555; font-size: 13px; margin-top: 6px; }
-
-      table { width: 100%; border-collapse: collapse; }
-      th, td { text-align: left; padding: 10px 10px; vertical-align: top; }
-      thead th { border-bottom: 1px solid #eaeaea; font-size: 13px; color: #333; }
-      tbody tr { border-bottom: 1px solid #f0f0f0; }
-      tbody tr:hover { background: #fdfdfd; }
-      .day { font-weight: 650; }
-      .meta { color: #666; font-size: 12px; margin-top: 4px; }
-
-      .actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
-      button { padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; background: #f7f7f7; cursor: pointer; }
-      button:hover { background: #efefef; }
-      .btn-ghost { padding: 6px 10px; font-size: 12px; }
-      .muted { color: #666; font-size: 12px; }
-      .count { font-weight: 600; color: #333; }
-      .linkrow { margin-top: 8px; }
-      .error { color: #b00020; font-size: 13px; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+      .loading { animation: pulse 0.9s ease-in-out infinite; }
+      @keyframes pulse { 0% { background-color: #fff; } 50% { background-color: #f1f5f9; } 100% { background-color: #fff; } }
     </style>
   </head>
-  <body>
-    <div class="wrap">
-      <div class="top">
+  <body class="bg-light">
+    <div class="container py-4">
+      <div class="d-flex justify-content-between align-items-baseline mb-3">
         <div>
-          <h1>Planning semaine du lundi {{ monday }}</h1>
-          <div class="sub">La liste de courses couvre tous les ingrédients prévus pour la semaine.</div>
+          <h1 class="h5 mb-1">Planning semaine du lundi {{ monday }}</h1>
+          <div class="text-muted small">La liste de courses couvre tous les ingrédients prévus pour la semaine.</div>
         </div>
-        <div><a href="/meal-planning/">Retour à la liste</a></div>
+        <a class="text-decoration-none" href="/meal-planning/">Retour à la liste</a>
       </div>
 
-      <div class="grid">
-        <div class="card">
-          <div id="err" class="error" style="display:none;"></div>
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 120px;">Jour</th>
-                <th>Plats</th>
-                <th style="width: 160px;">Durée</th>
-                <th style="width: 220px;">Restes</th>
-                <th style="width: 140px;"></th>
-              </tr>
-            </thead>
-            <tbody id="tbody"></tbody>
-          </table>
-          <div class="sub muted">Le GET JSON est effectué via <span class="mono">Accept: application/json</span> sur <span class="mono">/meal-planning/{{ monday }}</span>.</div>
+      <div class="row g-3">
+        <div class="col-12 col-lg-8">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <div id="err" class="text-danger small mb-2" style="display:none;"></div>
+              <div class="accordion" id="planningAcc"></div>
+              <div class="text-muted small mt-2">Le GET JSON est effectué via <code>/meal-planning/{{ monday }}</code>.</div>
+            </div>
+          </div>
         </div>
 
-        <div class="card">
-          <h2 style="font-size:16px;margin:0 0 8px 0;">Liste de courses</h2>
-          <div class="sub">Affichée sur sa page dédiée. Si elle existe, un lien apparaît ci-dessous.</div>
-
-          <div class="actions">
-            <button id="createList">Créer la liste de course</button>
-            <span id="listLink" class="muted" style="display:none;"></span>
+        <div class="col-12 col-lg-4">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h2 class="h6 mb-2">Liste de courses</h2>
+              <p class="text-muted small mb-2">Affichée sur sa page dédiée. Si elle existe, un lien apparaît ci-dessous.</p>
+              <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                <button class="btn btn-primary btn-sm" id="createList">Créer la liste de course</button>
+                <span id="listLink" class="text-muted small" style="display:none;"></span>
+              </div>
+              <div class="text-muted small" id="ingredientsCount"></div>
+              <div class="text-muted small mt-2">URL : <code>/meal-planning/{{ monday }}/shopping-list</code>.</div>
+            </div>
           </div>
-          <div class="muted linkrow" id="ingredientsCount"></div>
-          <div class="sub" style="margin-top:12px;">URL : <code>/meal-planning/{{ monday }}/shopping-list</code>.</div>
         </div>
       </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
       const monday = "{{ monday }}";
-      const tbody = document.getElementById("tbody");
+      const acc = document.getElementById("planningAcc");
       const err = document.getElementById("err");
-
       const listLink = document.getElementById("listLink");
       const createBtn = document.getElementById("createList");
       const ingredientsCount = document.getElementById("ingredientsCount");
 
       let allIngredients = [];
       let planningData = [];
+      let currentOpenIdx = null;
 
       function normalizeIngredient(s) {
         return (s || "").trim();
@@ -105,7 +76,7 @@
         }
         allIngredients = [...agg].sort((a, b) => a.localeCompare(b, "fr"));
         if (ingredientsCount) {
-          ingredientsCount.innerHTML = `<span class="count">${allIngredients.length}</span> ingrédient(s) détecté(s) dans le planning.`;
+          ingredientsCount.innerHTML = `<span class="fw-semibold">${allIngredients.length}</span> ingrédient(s) détecté(s) dans le planning.`;
         }
       }
 
@@ -126,50 +97,134 @@
         }
       }
 
-      function renderPlanning(planning) {
-        tbody.innerHTML = "";
+      function ingredientPopoverContent(meal) {
+        const src = Array.isArray(meal.courses) ? meal.courses : (Array.isArray(meal.ingredients) ? meal.ingredients : []);
+        if (!src.length) return "<em>Aucun ingrédient</em>";
+        return src.map(x => `• ${String(x)}`).join("<br/>");
+      }
+
+      function renderPlanning(planning, keepOpenIndex = null) {
+        acc.innerHTML = "";
         const order = new Map([["lundi", 1], ["mardi", 2], ["mercredi", 3], ["jeudi", 4], ["vendredi", 5], ["samedi", 6], ["dimanche", 7]]);
         const display = planning.map((m, idx) => ({ meal: m, idx }));
         display.sort((a, b) => (order.get(a.meal.jour) || 999) - (order.get(b.meal.jour) || 999));
+        const targetIdx = keepOpenIndex !== null ? keepOpenIndex : currentOpenIdx;
+        if (keepOpenIndex !== null) currentOpenIdx = keepOpenIndex;
 
-        for (const { meal, idx } of display) {
-          if ((meal.repas || "").toLowerCase() !== "soir") continue;
+        display.forEach(({ meal, idx }, i) => {
+          if ((meal.repas || "").toLowerCase() !== "soir") return;
+          const itemId = `acc-${i}`;
+          const ingId = `ing-${i}`;
+          const card = document.createElement("div");
+          card.className = "accordion-item";
 
-          const tr = document.createElement("tr");
+          const header = document.createElement("h2");
+          header.className = "accordion-header";
+          header.id = `heading-${itemId}`;
 
-          const tdDay = document.createElement("td");
-          tdDay.innerHTML = `<div class="day">${meal.jour || ""}</div><div class="meta">${meal.repas || ""}</div>`;
-
-          const tdPlats = document.createElement("td");
-          const plats = Array.isArray(meal.plats) ? meal.plats : [];
-          const ul = document.createElement("div");
-          ul.className = "meta";
-          ul.innerHTML = plats.map(p => "• " + String(p)).join("<br/>");
-          tdPlats.appendChild(ul);
-
-          const tdDur = document.createElement("td");
-          tdDur.textContent = (meal.duree_preparation_minutes != null) ? `${meal.duree_preparation_minutes} min` : "";
-
-          const tdRestes = document.createElement("td");
-          const restes = Array.isArray(meal.restes) ? meal.restes : [];
-          tdRestes.innerHTML = restes.length ? restes.map(r => "• " + String(r)).join("<br/>") : "<span class='muted'>—</span>";
-
-          const tdAction = document.createElement("td");
           const btn = document.createElement("button");
-          btn.className = "btn-ghost";
+          btn.className = "accordion-button collapsed";
           btn.type = "button";
-          btn.textContent = "Nouveau repas";
-          btn.addEventListener("click", () => regenerateMeal(idx));
-          tdAction.appendChild(btn);
+          btn.setAttribute("data-bs-toggle", "collapse");
+          btn.setAttribute("data-bs-target", `#${itemId}`);
+          btn.addEventListener("click", () => { currentOpenIdx = idx; });
+          btn.innerHTML = `<div class="me-2 fw-semibold text-capitalize">${meal.jour || ""}</div><div class="small text-muted">${(Array.isArray(meal.plats) ? meal.plats.join(", ") : "")}</div>`;
 
-          tr.appendChild(tdDay);
-          tr.appendChild(tdPlats);
-          tr.appendChild(tdDur);
-          tr.appendChild(tdRestes);
-          tr.appendChild(tdAction);
+          header.appendChild(btn);
+          card.appendChild(header);
 
-          tbody.appendChild(tr);
-        }
+          const body = document.createElement("div");
+          body.id = itemId;
+          body.className = "accordion-collapse collapse";
+          body.setAttribute("data-bs-parent", "#planningAcc");
+
+          const inner = document.createElement("div");
+          inner.className = "accordion-body";
+
+          const topRow = document.createElement("div");
+          topRow.className = "d-flex flex-wrap gap-2 align-items-center mb-2";
+
+          const badge = document.createElement("span");
+          badge.className = "badge bg-secondary";
+          badge.textContent = meal.repas || "";
+          topRow.appendChild(badge);
+
+          const dur = document.createElement("span");
+          dur.className = "text-muted small";
+          dur.textContent = meal.duree_preparation_minutes ? `${meal.duree_preparation_minutes} min` : "";
+          topRow.appendChild(dur);
+
+          const btnNew = document.createElement("button");
+          btnNew.className = "btn btn-outline-primary btn-sm";
+          btnNew.type = "button";
+          btnNew.textContent = "Nouveau repas";
+          btnNew.addEventListener("click", () => regenerateMeal(idx, card));
+          topRow.appendChild(btnNew);
+
+          const btnIng = document.createElement("button");
+          btnIng.className = "btn btn-outline-secondary btn-sm";
+          btnIng.type = "button";
+          btnIng.textContent = "Ingrédients";
+          btnIng.setAttribute("data-bs-toggle", "popover");
+          btnIng.setAttribute("data-bs-html", "true");
+          btnIng.setAttribute("data-bs-content", ingredientPopoverContent(meal));
+          topRow.appendChild(btnIng);
+
+          inner.appendChild(topRow);
+
+          const plats = Array.isArray(meal.plats) ? meal.plats : [];
+          const restes = Array.isArray(meal.restes) ? meal.restes : [];
+          const ingredients = Array.isArray(meal.ingredients) ? meal.ingredients : (Array.isArray(meal.courses) ? meal.courses : []);
+
+          function section(title, items, isPlat) {
+            const wrap = document.createElement("div");
+            wrap.className = "mb-2";
+            const h = document.createElement("div");
+            h.className = "fw-semibold";
+            h.textContent = title;
+            wrap.appendChild(h);
+            const content = document.createElement("div");
+            content.className = "text-muted small";
+            if (!items || !items.length) {
+              content.textContent = "—";
+            } else {
+              items.forEach((it, idx) => {
+                const row = document.createElement("div");
+                if (isPlat) {
+                  const a = document.createElement("a");
+                  a.href = "https://www.google.com/search?q=" + encodeURIComponent(String(it));
+                  a.target = "_blank";
+                  a.rel = "noopener noreferrer";
+                  a.textContent = String(it);
+                  row.textContent = "• ";
+                  row.appendChild(a);
+                } else {
+                  row.textContent = "• " + String(it);
+                }
+                content.appendChild(row);
+              });
+            }
+            wrap.appendChild(content);
+            return wrap;
+          }
+
+          inner.appendChild(section("Plats", plats, true));
+          inner.appendChild(section("Restes", restes, false));
+          inner.appendChild(section("Ingrédients", ingredients, false));
+
+          body.appendChild(inner);
+          card.appendChild(body);
+          acc.appendChild(card);
+
+          if (targetIdx !== null && targetIdx === idx) {
+            const collapse = new bootstrap.Collapse(body, { toggle: false });
+            collapse.show();
+          }
+        });
+
+        // Activer les popovers
+        const popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]'));
+        popoverTriggerList.forEach(el => new bootstrap.Popover(el));
       }
 
       async function persistCurrentList() {
@@ -204,10 +259,11 @@
         if (createBtn) createBtn.style.display = "none";
       }
 
-      async function regenerateMeal(idx) {
+      async function regenerateMeal(idx, rowEl) {
         err.style.display = "none";
         const meal = planningData[idx];
         if (!meal) return;
+        if (rowEl) rowEl.classList.add("loading");
         try {
           const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/regenerate`, {
             method: "POST",
@@ -225,11 +281,13 @@
           const resp = await r.json();
           const newMeal = resp.meal || resp;
           planningData[idx] = newMeal;
-          renderPlanning(planningData);
+          renderPlanning(planningData, idx);
           computeAllIngredients(planningData);
         } catch (e) {
           err.style.display = "block";
           err.textContent = "Génération impossible: " + (e && e.message ? e.message : e);
+        } finally {
+          if (rowEl) rowEl.classList.remove("loading");
         }
       }
 

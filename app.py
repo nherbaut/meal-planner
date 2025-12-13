@@ -20,6 +20,8 @@ DATA_DIR = APP_DIR / "data"
 TEMPLATES_DIR = APP_DIR / "templates"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+BUFFER_DIR = DATA_DIR / "buffers"
+BUFFER_DIR.mkdir(parents=True, exist_ok=True)
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -103,7 +105,7 @@ def _wants_json(request: Request) -> bool:
     return "application/json" in accept or "text/json" in accept
 
 
-def _load_shopping_list(monday: str) -> Dict[str, List[str]]:
+def _load_shopping_list(monday: str) -> Dict[str, Any]:
     p = _shopping_list_path(monday)
     if not p.exists():
         raise HTTPException(status_code=404, detail="Shopping list not found")
@@ -119,21 +121,86 @@ def _load_shopping_list(monday: str) -> Dict[str, List[str]]:
         raise HTTPException(status_code=500, detail="Stored shopping list must be an object")
     to_buy = data.get("to_buy", [])
     bought = data.get("bought", [])
+    notes = data.get("notes", {})
     if not isinstance(to_buy, list) or not all(isinstance(x, str) for x in to_buy):
         raise HTTPException(status_code=500, detail="Stored shopping list has invalid to_buy")
     if not isinstance(bought, list) or not all(isinstance(x, str) for x in bought):
         raise HTTPException(status_code=500, detail="Stored shopping list has invalid bought")
+    if not isinstance(notes, dict):
+        notes = {}
     return {
         "to_buy": [x for x in to_buy if x],
         "bought": [x for x in bought if x],
+        "notes": {k: v for k, v in notes.items() if isinstance(k, str) and isinstance(v, str)},
     }
 
 
-def _save_shopping_list(monday: str, to_buy: List[str], bought: Optional[List[str]] = None) -> None:
+def _save_shopping_list(monday: str, to_buy: List[str], bought: Optional[List[str]] = None, notes: Optional[Dict[str, str]] = None) -> None:
     to_buy_clean = [str(x).strip() for x in to_buy if isinstance(x, str) and str(x).strip()]
     bought_clean = [str(x).strip() for x in (bought or []) if isinstance(x, str) and str(x).strip()]
-    payload = {"to_buy": to_buy_clean, "bought": bought_clean}
+    payload = {"to_buy": to_buy_clean, "bought": bought_clean, "notes": notes or {}}
     _shopping_list_path(monday).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _update_shopping_list_after_substitution(monday: str, old_meal: Optional[Dict[str, Any]], new_meal: Dict[str, Any]) -> None:
+    try:
+        payload = _load_shopping_list(monday)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return
+        raise
+
+    def norm(s: str) -> str:
+        return str(s).strip().lower()
+
+    old_ing = {norm(x) for x in _meal_ingredients(old_meal or {})}
+    new_ing_raw = _meal_ingredients(new_meal)
+    new_ing = [(x, norm(x)) for x in new_ing_raw]
+    meal_title = ", ".join(new_meal.get("plats") or [])
+
+    to_buy = [str(x).strip() for x in payload.get("to_buy", []) if str(x).strip()]
+    bought = [str(x).strip() for x in payload.get("bought", []) if str(x).strip()]
+    notes = dict(payload.get("notes", {}))
+
+    bought_keys = {norm(x) for x in bought}
+
+    # remove old ingredients from to_buy (but never from bought)
+    to_buy_filtered: List[str] = []
+    seen_keys: set[str] = set()
+    for item in to_buy:
+        k = norm(item)
+        if k in old_ing:
+            continue
+        if k in seen_keys:
+            continue
+        seen_keys.add(k)
+        to_buy_filtered.append(item)
+
+    # add new ingredients unless already bought or already in to_buy
+    existing_keys = {norm(x) for x in to_buy_filtered}
+    for item, k in new_ing:
+        if not k:
+            continue
+        if k in bought_keys:
+            continue
+        if k in existing_keys:
+            continue
+        to_buy_filtered.append(item)
+        existing_keys.add(k)
+
+    # ensure to_buy has no items present in bought
+    to_buy_final = [x for x in to_buy_filtered if norm(x) not in bought_keys]
+
+    # update notes: remove old_ing entries, add new_ing entries with meal plats as reference
+    for k in old_ing:
+        notes.pop(k, None)
+    if meal_title:
+        for _, k in new_ing:
+            if not k:
+                continue
+            notes[k] = meal_title
+
+    _save_shopping_list(monday, to_buy_final, bought, notes)
 
 
 def _build_regen_prompt(monday: str, planning: List[Dict[str, Any]], day: str, repas: str) -> str:
@@ -211,58 +278,15 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
 
 
 def _generate_meal(monday: str, day: str, repas: str, planning: List[Dict[str, Any]]) -> Dict[str, Any]:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY")
-    prompt = _build_regen_prompt(monday, planning, day, repas)
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        "temperature": 1,
-    }
-    logger.info("OpenAI request (meal) monday=%s day=%s repas=%s model=%s", monday, day, repas, OPENAI_MODEL)
-    logger.info("OpenAI payload (meal): %s", json.dumps(payload, ensure_ascii=False))
-    try:
-        r = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=60,
-        )
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI request failed: {e}") from e
-    logger.info("OpenAI response (meal) status=%s", r.status_code)
-    logger.info("OpenAI body (meal): %s", r.text)
-    if r.status_code != 200:
-        try:
-            detail = r.json()
-        except Exception:
-            detail = r.text
-        raise HTTPException(status_code=500, detail=f"OpenAI error: {detail}")
-    data = r.json()
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    try:
-        meal = _extract_json_from_text(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unable to parse meal JSON: {e}")
+    buffer_meals = _load_meal_buffer(monday)
+    if not buffer_meals:
+        logger.info("Meal buffer empty for %s, generating new pool", monday)
+        buffer_meals = _generate_meal_pool(monday, planning)
+        _save_meal_buffer(monday, buffer_meals)
 
-    # Normalise/force keys
-    meal["jour"] = day
-    meal["repas"] = repas
-    meal["plats"] = meal.get("plats") if isinstance(meal.get("plats"), list) else []
-    meal["ingredients"] = meal.get("ingredients") if isinstance(meal.get("ingredients"), list) else []
-    meal["courses"] = meal.get("courses") if isinstance(meal.get("courses"), list) else []
-    meal["restes"] = meal.get("restes") if isinstance(meal.get("restes"), list) else []
-    if not isinstance(meal.get("duree_preparation_minutes"), (int, float)):
-        meal["duree_preparation_minutes"] = None
-    else:
-        meal["duree_preparation_minutes"] = int(meal["duree_preparation_minutes"])
-    return meal
+    meal = buffer_meals.pop(0)
+    _save_meal_buffer(monday, buffer_meals)
+    return _normalize_meal(day, repas, meal)
 
 
 def _normalize_meal(day: str, repas: str, meal: Dict[str, Any]) -> Dict[str, Any]:
@@ -278,6 +302,59 @@ def _normalize_meal(day: str, repas: str, meal: Dict[str, Any]) -> Dict[str, Any
     else:
         meal["duree_preparation_minutes"] = int(meal["duree_preparation_minutes"])
     return meal
+
+
+def _meal_ingredients(meal: Dict[str, Any]) -> List[str]:
+    src = meal.get("courses") if isinstance(meal.get("courses"), list) else meal.get("ingredients")
+    if not isinstance(src, list):
+        return []
+    return [str(x).strip() for x in src if isinstance(x, str) and str(x).strip()]
+
+
+def _compute_notes_from_planning(monday: str) -> Dict[str, str]:
+    try:
+        planning = _load_planning(monday)
+    except HTTPException:
+        return {}
+    def norm(s: str) -> str:
+        return str(s).strip().lower()
+    notes: Dict[str, str] = {}
+    for meal in planning:
+        if not isinstance(meal, dict):
+            continue
+        title = ", ".join(meal.get("plats") or []) if isinstance(meal.get("plats"), list) else ""
+        for ing in _meal_ingredients(meal):
+            k = norm(ing)
+            if not k:
+                continue
+            notes.setdefault(k, title)
+    return notes
+
+
+def _buffer_path(monday: str) -> Path:
+    return BUFFER_DIR / f"buffer-{monday}.json"
+
+
+def _load_meal_buffer(monday: str) -> List[Dict[str, Any]]:
+    p = _buffer_path(monday)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("Buffer file corrupted, resetting: %s", p)
+        return []
+    if not isinstance(data, list):
+        return []
+    cleaned: List[Dict[str, Any]] = []
+    for m in data:
+        if isinstance(m, dict):
+            cleaned.append(m)
+    return cleaned
+
+
+def _save_meal_buffer(monday: str, meals: List[Dict[str, Any]]) -> None:
+    _buffer_path(monday).write_text(json.dumps(meals, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _load_previous_weeks(monday: str, count: int = 2) -> Dict[str, List[Dict[str, Any]]]:
@@ -355,7 +432,7 @@ def _generate_week(monday: str) -> List[Dict[str, Any]]:
             },
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.6,
+        
     }
     logger.info("OpenAI request (week) monday=%s model=%s", monday, OPENAI_MODEL)
     logger.info("OpenAI payload (week): %s", json.dumps(payload, ensure_ascii=False))
@@ -364,7 +441,7 @@ def _generate_week(monday: str) -> List[Dict[str, Any]]:
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
-            timeout=60,
+            timeout=180,
         )
     except requests.RequestException as e:
         raise HTTPException(status_code=500, detail=f"OpenAI request failed: {e}") from e
@@ -401,6 +478,84 @@ def _generate_week(monday: str) -> List[Dict[str, Any]]:
     if not normalized:
         raise HTTPException(status_code=500, detail="Generated planning is empty")
     return normalized
+
+
+def _build_pool_prompt(monday: str, planning: List[Dict[str, Any]], previous_weeks: Dict[str, List[Dict[str, Any]]]) -> str:
+    return """
+Génère 15 repas du soir différents entre eux et différents des repas déjà présents dans cette semaine et la précédente.
+Contexte: date du lundi de la semaine en cours: {{date}}.
+Semaines à éviter (pas de répétition de plats ou courses) :
+{{history}}
+
+Chaque repas doit respecter:
+- plats adaptés à 2 parents + 2 enfants (3 et 7 ans)
+- Sud-Ouest de la France, produits de saison trouvables en supermarché, pas d’ultra-transformés
+- Pas besoin de dessert
+- Protéines végétales appréciées
+- Préparation < 45 min (idéalement 30)
+
+Réponds par un tableau JSON de 15 objets, format:
+{
+  "jour": "placeholder",
+  "repas": "soir",
+  "plats": [...],
+  "ingredients": [...],
+  "courses": [...],
+  "duree_preparation_minutes": 30,
+  "restes": [...]
+}
+Ne mets aucun texte en dehors du tableau JSON.
+""".replace("{{date}}", monday).replace("{{history}}", json.dumps({"current": planning, "previous": previous_weeks}, ensure_ascii=False, indent=2))
+
+
+def _generate_meal_pool(monday: str, planning: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY")
+    previous_weeks = _load_previous_weeks(monday, count=1)
+    prompt = _build_pool_prompt(monday, planning, previous_weeks)
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Tu es un générateur JSON strict. Tu réponds uniquement avec le JSON demandé, sans texte additionnel, sans balises Markdown, sans ```.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        
+    }
+    logger.info("OpenAI request (pool) monday=%s model=%s", monday, OPENAI_MODEL)
+    logger.info("OpenAI payload (pool): %s", json.dumps(payload, ensure_ascii=False))
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=180,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI request failed: {e}") from e
+    logger.info("OpenAI response (pool) status=%s", r.status_code)
+    logger.info("OpenAI body (pool): %s", r.text)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {detail}")
+    data = r.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    try:
+        arr = _extract_json_from_text(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to parse pool JSON: {e}")
+    if not isinstance(arr, list):
+        raise HTTPException(status_code=500, detail="Generated pool is not a list")
+    meals: List[Dict[str, Any]] = [m for m in arr if isinstance(m, dict)]
+    if not meals:
+        raise HTTPException(status_code=500, detail="Generated pool is empty")
+    return meals
 
 
 @app.get("/meal-planning/", response_class=HTMLResponse)
@@ -501,7 +656,15 @@ async def create_shopping_list(request: Request, monday: str):
             bought_list = [x for x in bought if isinstance(x, str)]
         to_buy_list = [x for x in to_buy if isinstance(x, str)]
 
-    _save_shopping_list(monday, to_buy_list, bought_list)
+    # notes : utiliser celles fournies ou les générer depuis le planning
+    notes_payload = payload.get("notes")
+    if isinstance(notes_payload, dict):
+        notes = {str(k): str(v) for k, v in notes_payload.items()}
+    else:
+        notes = _compute_notes_from_planning(monday)
+
+    # deduplicate and store
+    _save_shopping_list(monday, to_buy_list, bought_list, notes)
     saved = _load_shopping_list(monday)
     return JSONResponse(status_code=201, content={"monday": monday, **saved})
 
@@ -520,6 +683,7 @@ def shopping_list(request: Request, monday: str):
             "request": request,
             "to_buy": payload["to_buy"],
             "bought": payload["bought"],
+            "notes": payload.get("notes", {}),
             "monday": monday,
         },
     )
@@ -539,16 +703,23 @@ async def regenerate_meal(request: Request, monday: str):
 
     planning = _load_planning(monday)
     new_meal = _generate_meal(monday, day, repas, planning)
+    old_meal: Optional[Dict[str, Any]] = None
 
     replaced = False
     for i, m in enumerate(planning):
         if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
+            old_meal = m
             planning[i] = new_meal
             replaced = True
             break
     if not replaced:
         planning.append(new_meal)
     _save_planning(monday, planning)
+    try:
+        _update_shopping_list_after_substitution(monday, old_meal, new_meal)
+    except HTTPException:
+        # si pas de liste existante, on ignore
+        pass
     return JSONResponse(content={"meal": new_meal, "monday": monday})
 
 
