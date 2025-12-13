@@ -3,7 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import re
-from datetime import datetime
+import logging
+import os
+import requests
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +25,12 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 app = FastAPI(title="Meal Planning")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+logger = logging.getLogger("meal_planning")
+if not logger.handlers:
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 
 
 def _validate_date_str(monday: str) -> None:
@@ -125,6 +134,273 @@ def _save_shopping_list(monday: str, to_buy: List[str], bought: Optional[List[st
     bought_clean = [str(x).strip() for x in (bought or []) if isinstance(x, str) and str(x).strip()]
     payload = {"to_buy": to_buy_clean, "bought": bought_clean}
     _shopping_list_path(monday).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _build_regen_prompt(monday: str, planning: List[Dict[str, Any]], day: str, repas: str) -> str:
+    template = """
+aide moi à faire le menu pour un jour de la semaine. pour 2 parents  2 enfants de 3 et 7 ans mangent à la maison les soirs en semaine et le midi et soir en weekend. Les parent ramène les restes des repas des soirs pour le lendemain midi en semaine. On est en {{date}} nous sommes en france dans le sud ouest, il faut des aliments de saison Il faut des aliments qu'on peut trouver en super marché On ne veut pas d'aliments ultra-transformés Il faut que ça plaise aux enfants Pas besoin d'avoir de la viande/poisson le soir, mais des proteines végétales de bonne qualité sont appréciées. Pas besoin de prévoir le dessert Les repas doivent être préparés en moins de 45\", 30\" idéalement 
+
+- liste des plat - liste des courses pour le repas. - durée de préparation - liste de restes - liste des ingrédients
+
+suivivant cet exemple de json:
+
+{
+    "jour": "vendredi",
+    "repas": "soir",
+    "plats": [
+      "Soupe de légumes d’hiver",
+      "Tartines de fromage"
+    ],
+    "ingredients": [
+      "courge",
+      "carottes",
+      "poireau",
+      "pomme de terre",
+      "pain",
+      "fromage",
+      "huile d'olive",
+      "sel"
+    ],
+    "courses": [
+      "courge",
+      "carottes",
+      "poireaux",
+      "pommes de terre",
+      "pain",
+      "fromage"
+    ],
+    "duree_preparation_minutes": 30,
+    "restes": [
+      "Soupe de légumes"
+    ]
+  }
+
+
+les repas devraient être variés par rapport à la liste des repas existant, {{json}}
+"""
+    extra = f"\nGénère exactement un objet JSON pour le jour '{day}' et le repas '{repas}', au format de l'exemple ci-dessus, sans texte additionnel."
+    return template.replace("{{date}}", monday).replace("{{json}}", json.dumps(planning, ensure_ascii=False, indent=2)) + extra
+
+
+def _extract_json_from_text(text: str) -> Dict[str, Any]:
+    if not text:
+        raise ValueError("Empty LLM response")
+    snippet = text.strip()
+
+    # If response already starts with JSON, keep as-is
+    if snippet.startswith("{") or snippet.startswith("["):
+        return json.loads(snippet)
+
+    # Try fenced blocks first
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("{") or part.startswith("["):
+                return json.loads(part)
+
+    # Fallback: capture outermost object, otherwise outermost array
+    if "{" in text and "}" in text and text.find("{") < text.rfind("}"):
+        snippet = text[text.find("{") : text.rfind("}") + 1]
+        return json.loads(snippet)
+    if "[" in text and "]" in text and text.find("[") < text.rfind("]"):
+        snippet = text[text.find("[") : text.rfind("]") + 1]
+        return json.loads(snippet)
+
+    return json.loads(snippet)
+
+
+def _generate_meal(monday: str, day: str, repas: str, planning: List[Dict[str, Any]]) -> Dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY")
+    prompt = _build_regen_prompt(monday, planning, day, repas)
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": 1,
+    }
+    logger.info("OpenAI request (meal) monday=%s day=%s repas=%s model=%s", monday, day, repas, OPENAI_MODEL)
+    logger.info("OpenAI payload (meal): %s", json.dumps(payload, ensure_ascii=False))
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI request failed: {e}") from e
+    logger.info("OpenAI response (meal) status=%s", r.status_code)
+    logger.info("OpenAI body (meal): %s", r.text)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {detail}")
+    data = r.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    try:
+        meal = _extract_json_from_text(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to parse meal JSON: {e}")
+
+    # Normalise/force keys
+    meal["jour"] = day
+    meal["repas"] = repas
+    meal["plats"] = meal.get("plats") if isinstance(meal.get("plats"), list) else []
+    meal["ingredients"] = meal.get("ingredients") if isinstance(meal.get("ingredients"), list) else []
+    meal["courses"] = meal.get("courses") if isinstance(meal.get("courses"), list) else []
+    meal["restes"] = meal.get("restes") if isinstance(meal.get("restes"), list) else []
+    if not isinstance(meal.get("duree_preparation_minutes"), (int, float)):
+        meal["duree_preparation_minutes"] = None
+    else:
+        meal["duree_preparation_minutes"] = int(meal["duree_preparation_minutes"])
+    return meal
+
+
+def _normalize_meal(day: str, repas: str, meal: Dict[str, Any]) -> Dict[str, Any]:
+    meal = dict(meal or {})
+    meal["jour"] = day
+    meal["repas"] = repas
+    meal["plats"] = meal.get("plats") if isinstance(meal.get("plats"), list) else []
+    meal["ingredients"] = meal.get("ingredients") if isinstance(meal.get("ingredients"), list) else []
+    meal["courses"] = meal.get("courses") if isinstance(meal.get("courses"), list) else meal.get("courses", [])
+    meal["restes"] = meal.get("restes") if isinstance(meal.get("restes"), list) else []
+    if not isinstance(meal.get("duree_preparation_minutes"), (int, float)):
+        meal["duree_preparation_minutes"] = None
+    else:
+        meal["duree_preparation_minutes"] = int(meal["duree_preparation_minutes"])
+    return meal
+
+
+def _load_previous_weeks(monday: str, count: int = 2) -> Dict[str, List[Dict[str, Any]]]:
+    base = datetime.strptime(monday, "%Y-%m-%d").date()
+    prev: Dict[str, List[Dict[str, Any]]] = {}
+    for i in range(1, count + 1):
+        d = base - timedelta(days=7 * i)
+        key = d.isoformat()
+        try:
+            prev[key] = _load_planning(key)
+        except HTTPException:
+            continue
+    return prev
+
+
+def _build_week_prompt(monday: str, previous_weeks: Dict[str, List[Dict[str, Any]]]) -> str:
+    template = """
+aide moi à faire le menu pour une semaine complète. pour 2 parents  2 enfants de 3 et 7 ans mangent à la maison les soirs en semaine et le midi et soir en weekend. Les parent ramène les restes des repas des soirs pour le lendemain midi en semaine. On est en {{date}} nous sommes en france dans le sud ouest, il faut des aliments de saison Il faut des aliments qu'on peut trouver en super marché On ne veut pas d'aliments ultra-transformés Il faut que ça plaise aux enfants Pas besoin d'avoir de la viande/poisson le soir, mais des proteines végétales de bonne qualité sont appréciées. Pas besoin de prévoir le dessert Les repas doivent être préparés en moins de 45", 30" idéalement 
+
+- liste des plat - liste des courses pour le repas. - durée de préparation - liste de restes - liste des ingrédients
+
+Retourne un tableau JSON, avec un objet par repas du soir (jour, repas=soir) pour lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, au format:
+
+{
+    "jour": "vendredi",
+    "repas": "soir",
+    "plats": [
+      "Soupe de légumes d’hiver",
+      "Tartines de fromage"
+    ],
+    "ingredients": [
+      "courge",
+      "carottes",
+      "poireau",
+      "pomme de terre",
+      "pain",
+      "fromage",
+      "huile d'olive",
+      "sel"
+    ],
+    "courses": [
+      "courge",
+      "carottes",
+      "poireaux",
+      "pommes de terre",
+      "pain",
+      "fromage"
+    ],
+    "duree_preparation_minutes": 30,
+    "restes": [
+      "Soupe de légumes"
+    ]
+  }
+
+Semaines précédentes (ne pas répéter les plats/courses proposés) :
+{{history}}
+
+Réponds UNIQUEMENT par un tableau JSON valide (pas de texte avant/après, pas de ```). Pas de plat déjà proposé dans les semaines précédentes.
+"""
+    history = json.dumps(previous_weeks, ensure_ascii=False, indent=2)
+    return template.replace("{{date}}", monday).replace("{{history}}", history)
+
+def _generate_week(monday: str) -> List[Dict[str, Any]]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY")
+    previous_weeks = _load_previous_weeks(monday, count=2)
+    prompt = _build_week_prompt(monday, previous_weeks)
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Tu es un générateur JSON strict. Tu réponds uniquement avec le JSON demandé, sans texte additionnel, sans balises Markdown, sans ```.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.6,
+    }
+    logger.info("OpenAI request (week) monday=%s model=%s", monday, OPENAI_MODEL)
+    logger.info("OpenAI payload (week): %s", json.dumps(payload, ensure_ascii=False))
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI request failed: {e}") from e
+    logger.info("OpenAI response (week) status=%s", r.status_code)
+    logger.info("OpenAI body (week): %s", r.text)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {detail}")
+    data = r.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    try:
+        arr = _extract_json_from_text(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to parse planning JSON: {e}")
+    if not isinstance(arr, list):
+        raise HTTPException(status_code=500, detail="Generated planning is not a list")
+    normalized: List[Dict[str, Any]] = []
+    order = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    for idx, day in enumerate(order):
+        # pick meal from returned list matching day, or fallback to current idx
+        found: Optional[Dict[str, Any]] = None
+        for m in arr:
+            if isinstance(m, dict) and str(m.get("jour", "")).strip().lower() == day:
+                found = m
+                break
+        if found is None and idx < len(arr) and isinstance(arr[idx], dict):
+            found = arr[idx]
+        if not isinstance(found, dict):
+            continue
+        normalized.append(_normalize_meal(day, "soir", found))
+    if not normalized:
+        raise HTTPException(status_code=500, detail="Generated planning is empty")
+    return normalized
 
 
 @app.get("/meal-planning/", response_class=HTMLResponse)
@@ -247,3 +523,38 @@ def shopping_list(request: Request, monday: str):
             "monday": monday,
         },
     )
+
+
+@app.post("/meal-planning/{monday}/regenerate")
+async def regenerate_meal(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    day = (body.get("jour") or body.get("day") or "").strip().lower()
+    repas = (body.get("repas") or "soir").strip().lower()
+    if not day:
+        raise HTTPException(status_code=400, detail="Missing jour/day")
+
+    planning = _load_planning(monday)
+    new_meal = _generate_meal(monday, day, repas, planning)
+
+    replaced = False
+    for i, m in enumerate(planning):
+        if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
+            planning[i] = new_meal
+            replaced = True
+            break
+    if not replaced:
+        planning.append(new_meal)
+    _save_planning(monday, planning)
+    return JSONResponse(content={"meal": new_meal, "monday": monday})
+
+
+@app.post("/meal-planning/{monday}/generate-week")
+def generate_week(monday: str):
+    _validate_date_str(monday)
+    planning = _generate_week(monday)
+    _save_planning(monday, planning)
+    return JSONResponse(status_code=201, content={"monday": monday, "planning": planning})

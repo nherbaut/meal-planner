@@ -36,6 +36,7 @@
           <div class="row">
             <button type="button" id="validate">Valider JSON</button>
             <button type="submit">Envoyer</button>
+            <button type="button" id="generate">Générer automatiquement</button>
           </div>
           <div class="msg" id="msg"></div>
         </form>
@@ -45,6 +46,7 @@
     <script>
       const t = document.getElementById("t");
       const msg = document.getElementById("msg");
+      const genBtn = document.getElementById("generate");
 
       function setMsg(text, isError) {
         msg.style.display = "block";
@@ -64,7 +66,31 @@
           return setMsg("JSON invalide: " + e.message, true);
         }
       });
+
+      genBtn.addEventListener("click", async () => {
+        msg.style.display = "none";
+        genBtn.disabled = true;
+        genBtn.textContent = "Génération…";
+        try {
+          const r = await fetch(`/meal-planning/${encodeURIComponent("{{ monday }}")}/generate-week`, {
+            method: "POST",
+          });
+          if (!r.ok) {
+            let detail = r.status;
+            try {
+              const payload = await r.json();
+              if (payload && payload.detail) detail = payload.detail;
+            } catch (_) {}
+            throw new Error(detail);
+          }
+          window.location.href = `/meal-planning/${encodeURIComponent("{{ monday }}")}`;
+        } catch (e) {
+          setMsg("Génération impossible: " + (e && e.message ? e.message : e), true);
+        } finally {
+          genBtn.disabled = false;
+          genBtn.textContent = "Générer automatiquement";
+        }
+      });
     </script>
   </body>
 </html>
-

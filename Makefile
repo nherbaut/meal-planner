@@ -1,6 +1,7 @@
 .PHONY: build build-all-arch run
 
 IMAGE ?= nherbaut/meal-planning:latest
+ENV_FILE ?= .env
 
 # Detect host arch and map to Docker platform
 HOST_ARCH := $(shell uname -m)
@@ -19,4 +20,4 @@ build-all-arch:
 	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 -t $(IMAGE) --push .
 
 run:
-	DOCKER_BUILDKIT=1 docker compose up -d --no-build
+	DOCKER_BUILDKIT=1 docker compose --env-file $(ENV_FILE) up -d --no-build

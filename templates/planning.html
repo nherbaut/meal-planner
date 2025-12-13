@@ -28,6 +28,7 @@
       .actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
       button { padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; background: #f7f7f7; cursor: pointer; }
       button:hover { background: #efefef; }
+      .btn-ghost { padding: 6px 10px; font-size: 12px; }
       .muted { color: #666; font-size: 12px; }
       .count { font-weight: 600; color: #333; }
       .linkrow { margin-top: 8px; }
@@ -55,6 +56,7 @@
                 <th>Plats</th>
                 <th style="width: 160px;">Durée</th>
                 <th style="width: 220px;">Restes</th>
+                <th style="width: 140px;"></th>
               </tr>
             </thead>
             <tbody id="tbody"></tbody>
@@ -86,6 +88,7 @@
       const ingredientsCount = document.getElementById("ingredientsCount");
 
       let allIngredients = [];
+      let planningData = [];
 
       function normalizeIngredient(s) {
         return (s || "").trim();
@@ -126,9 +129,10 @@
       function renderPlanning(planning) {
         tbody.innerHTML = "";
         const order = new Map([["lundi", 1], ["mardi", 2], ["mercredi", 3], ["jeudi", 4], ["vendredi", 5], ["samedi", 6], ["dimanche", 7]]);
-        planning.sort((a, b) => (order.get(a.jour) || 999) - (order.get(b.jour) || 999));
+        const display = planning.map((m, idx) => ({ meal: m, idx }));
+        display.sort((a, b) => (order.get(a.meal.jour) || 999) - (order.get(b.meal.jour) || 999));
 
-        for (const meal of planning) {
+        for (const { meal, idx } of display) {
           if ((meal.repas || "").toLowerCase() !== "soir") continue;
 
           const tr = document.createElement("tr");
@@ -150,10 +154,19 @@
           const restes = Array.isArray(meal.restes) ? meal.restes : [];
           tdRestes.innerHTML = restes.length ? restes.map(r => "• " + String(r)).join("<br/>") : "<span class='muted'>—</span>";
 
+          const tdAction = document.createElement("td");
+          const btn = document.createElement("button");
+          btn.className = "btn-ghost";
+          btn.type = "button";
+          btn.textContent = "Nouveau repas";
+          btn.addEventListener("click", () => regenerateMeal(idx));
+          tdAction.appendChild(btn);
+
           tr.appendChild(tdDay);
           tr.appendChild(tdPlats);
           tr.appendChild(tdDur);
           tr.appendChild(tdRestes);
+          tr.appendChild(tdAction);
 
           tbody.appendChild(tr);
         }
@@ -191,6 +204,35 @@
         if (createBtn) createBtn.style.display = "none";
       }
 
+      async function regenerateMeal(idx) {
+        err.style.display = "none";
+        const meal = planningData[idx];
+        if (!meal) return;
+        try {
+          const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/regenerate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jour: meal.jour, repas: meal.repas })
+          });
+          if (!r.ok) {
+            let detail = r.status;
+            try {
+              const payload = await r.json();
+              if (payload && payload.detail) detail = payload.detail;
+            } catch (_) {}
+            throw new Error(detail);
+          }
+          const resp = await r.json();
+          const newMeal = resp.meal || resp;
+          planningData[idx] = newMeal;
+          renderPlanning(planningData);
+          computeAllIngredients(planningData);
+        } catch (e) {
+          err.style.display = "block";
+          err.textContent = "Génération impossible: " + (e && e.message ? e.message : e);
+        }
+      }
+
       createBtn.addEventListener("click", async () => {
         try {
           await persistCurrentList();
@@ -206,10 +248,10 @@
             headers: { "Accept": "application/json" }
           });
           if (!r.ok) throw new Error("GET JSON failed: " + r.status);
-          const planning = await r.json();
-          if (!Array.isArray(planning)) throw new Error("Invalid JSON: not an array");
-          renderPlanning(planning);
-          computeAllIngredients(planning);
+          planningData = await r.json();
+          if (!Array.isArray(planningData)) throw new Error("Invalid JSON: not an array");
+          renderPlanning(planningData);
+          computeAllIngredients(planningData);
           await loadSavedListIfAny();
         } catch (e) {
           err.style.display = "block";
