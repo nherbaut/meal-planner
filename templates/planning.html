@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Planning - {{ monday }}</title>
+    <style>
+      :root { color-scheme: light; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; background: #fafafa; }
+      .wrap { max-width: 1100px; margin: 0 auto; }
+      .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+      h1 { font-size: 20px; margin: 0; }
+      a { text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      .grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; align-items: start; }
+      .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 14px; box-shadow: 0 1px 0 rgba(0,0,0,0.04); background: #fff; }
+      .sub { color: #555; font-size: 13px; margin-top: 6px; }
+
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 10px 10px; vertical-align: top; }
+      thead th { border-bottom: 1px solid #eaeaea; font-size: 13px; color: #333; }
+      tbody tr { border-bottom: 1px solid #f0f0f0; }
+      tbody tr:hover { background: #fdfdfd; }
+      .day { font-weight: 650; }
+      .meta { color: #666; font-size: 12px; margin-top: 4px; }
+
+      .actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+      button { padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; background: #f7f7f7; cursor: pointer; }
+      button:hover { background: #efefef; }
+      .muted { color: #666; font-size: 12px; }
+      .count { font-weight: 600; color: #333; }
+      .linkrow { margin-top: 8px; }
+      .error { color: #b00020; font-size: 13px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top">
+        <div>
+          <h1>Planning semaine du lundi {{ monday }}</h1>
+          <div class="sub">La liste de courses couvre tous les ingrédients prévus pour la semaine.</div>
+        </div>
+        <div><a href="/meal-planning/">Retour à la liste</a></div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div id="err" class="error" style="display:none;"></div>
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 120px;">Jour</th>
+                <th>Plats</th>
+                <th style="width: 160px;">Durée</th>
+                <th style="width: 220px;">Restes</th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+          <div class="sub muted">Le GET JSON est effectué via <span class="mono">Accept: application/json</span> sur <span class="mono">/meal-planning/{{ monday }}</span>.</div>
+        </div>
+
+        <div class="card">
+          <h2 style="font-size:16px;margin:0 0 8px 0;">Liste de courses</h2>
+          <div class="sub">Affichée sur sa page dédiée. Si elle existe, un lien apparaît ci-dessous.</div>
+
+          <div class="actions">
+            <button id="createList">Créer la liste de course</button>
+            <span id="listLink" class="muted" style="display:none;"></span>
+          </div>
+          <div class="muted linkrow" id="ingredientsCount"></div>
+          <div class="sub" style="margin-top:12px;">URL : <code>/meal-planning/{{ monday }}/shopping-list</code>.</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const monday = "{{ monday }}";
+      const tbody = document.getElementById("tbody");
+      const err = document.getElementById("err");
+
+      const listLink = document.getElementById("listLink");
+      const createBtn = document.getElementById("createList");
+      const ingredientsCount = document.getElementById("ingredientsCount");
+
+      let allIngredients = [];
+
+      function normalizeIngredient(s) {
+        return (s || "").trim();
+      }
+
+      function computeAllIngredients(planning) {
+        const agg = new Set();
+        for (const meal of planning) {
+          const src = Array.isArray(meal.courses) ? meal.courses : (Array.isArray(meal.ingredients) ? meal.ingredients : []);
+          for (const raw of src) {
+            const ing = normalizeIngredient(raw);
+            if (ing) agg.add(ing);
+          }
+        }
+        allIngredients = [...agg].sort((a, b) => a.localeCompare(b, "fr"));
+        if (ingredientsCount) {
+          ingredientsCount.innerHTML = `<span class="count">${allIngredients.length}</span> ingrédient(s) détecté(s) dans le planning.`;
+        }
+      }
+
+      async function loadSavedListIfAny() {
+        try {
+          const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/shopping-list`, {
+            headers: { "Accept": "application/json" }
+          });
+          if (r.status === 404) return;
+          if (!r.ok) throw new Error("Impossible de charger la liste sauvegardée");
+          const data = await r.json();
+          const hasData = data && (Array.isArray(data.items) || Array.isArray(data.to_buy));
+          if (!hasData) return;
+          showListLink(`/meal-planning/${encodeURIComponent(monday)}/shopping-list`);
+        } catch (e) {
+          err.style.display = "block";
+          err.textContent = "Liste sauvegardée non chargée: " + (e && e.message ? e.message : e);
+        }
+      }
+
+      function renderPlanning(planning) {
+        tbody.innerHTML = "";
+        const order = new Map([["lundi", 1], ["mardi", 2], ["mercredi", 3], ["jeudi", 4], ["vendredi", 5], ["samedi", 6], ["dimanche", 7]]);
+        planning.sort((a, b) => (order.get(a.jour) || 999) - (order.get(b.jour) || 999));
+
+        for (const meal of planning) {
+          if ((meal.repas || "").toLowerCase() !== "soir") continue;
+
+          const tr = document.createElement("tr");
+
+          const tdDay = document.createElement("td");
+          tdDay.innerHTML = `<div class="day">${meal.jour || ""}</div><div class="meta">${meal.repas || ""}</div>`;
+
+          const tdPlats = document.createElement("td");
+          const plats = Array.isArray(meal.plats) ? meal.plats : [];
+          const ul = document.createElement("div");
+          ul.className = "meta";
+          ul.innerHTML = plats.map(p => "• " + String(p)).join("<br/>");
+          tdPlats.appendChild(ul);
+
+          const tdDur = document.createElement("td");
+          tdDur.textContent = (meal.duree_preparation_minutes != null) ? `${meal.duree_preparation_minutes} min` : "";
+
+          const tdRestes = document.createElement("td");
+          const restes = Array.isArray(meal.restes) ? meal.restes : [];
+          tdRestes.innerHTML = restes.length ? restes.map(r => "• " + String(r)).join("<br/>") : "<span class='muted'>—</span>";
+
+          tr.appendChild(tdDay);
+          tr.appendChild(tdPlats);
+          tr.appendChild(tdDur);
+          tr.appendChild(tdRestes);
+
+          tbody.appendChild(tr);
+        }
+      }
+
+      async function persistCurrentList() {
+        if (!allIngredients.length) {
+          err.style.display = "block";
+          err.textContent = "Aucun ingrédient à sauvegarder.";
+          return null;
+        }
+        err.style.display = "none";
+        const url = `/meal-planning/${encodeURIComponent(monday)}/shopping-list`;
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: allIngredients })
+        });
+        if (!r.ok) {
+          let detail = r.status;
+          try {
+            const payload = await r.json();
+            if (payload && payload.detail) detail = payload.detail;
+          } catch (_) {}
+          throw new Error("Sauvegarde impossible: " + detail);
+        }
+        showListLink(url);
+        return url;
+      }
+
+      function showListLink(url) {
+        if (!listLink) return;
+        listLink.style.display = "inline";
+        listLink.innerHTML = `Liste existante : <a href="${url}">${location.origin}${url}</a>`;
+        if (createBtn) createBtn.style.display = "none";
+      }
+
+      createBtn.addEventListener("click", async () => {
+        try {
+          await persistCurrentList();
+        } catch (e) {
+          err.style.display = "block";
+          err.textContent = String(e && e.message ? e.message : e);
+        }
+      });
+
+      async function main() {
+        try {
+          const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}`, {
+            headers: { "Accept": "application/json" }
+          });
+          if (!r.ok) throw new Error("GET JSON failed: " + r.status);
+          const planning = await r.json();
+          if (!Array.isArray(planning)) throw new Error("Invalid JSON: not an array");
+          renderPlanning(planning);
+          computeAllIngredients(planning);
+          await loadSavedListIfAny();
+        } catch (e) {
+          err.style.display = "block";
+          err.textContent = String(e && e.message ? e.message : e);
+        }
+      }
+
+      main();
+    </script>
+  </body>
+</html>
