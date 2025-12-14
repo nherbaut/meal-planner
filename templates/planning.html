@@ -68,7 +68,7 @@
       function computeAllIngredients(planning) {
         const agg = new Set();
         for (const meal of planning) {
-          const src = Array.isArray(meal.courses) ? meal.courses : (Array.isArray(meal.ingredients) ? meal.ingredients : []);
+          const src = Array.isArray(meal.ingredients) ? meal.ingredients : [];
           for (const raw of src) {
             const ing = normalizeIngredient(raw);
             if (ing) agg.add(ing);
@@ -166,13 +166,20 @@
           btnNew.addEventListener("click", () => regenerateMeal(idx, card));
           topRow.appendChild(btnNew);
 
+          const btnMealie = document.createElement("button");
+          btnMealie.className = "btn btn-outline-success btn-sm";
+          btnMealie.type = "button";
+          btnMealie.textContent = "Substituer avec Mealie";
+          btnMealie.addEventListener("click", () => regenerateMealMealie(idx, card));
+          topRow.appendChild(btnMealie);
+
           
 
           inner.appendChild(topRow);
 
           const plats = Array.isArray(meal.plats) ? meal.plats : [];
           const restes = Array.isArray(meal.restes) ? meal.restes : [];
-          const ingredients = Array.isArray(meal.ingredients) ? meal.ingredients : (Array.isArray(meal.courses) ? meal.courses : []);
+          const ingredients = Array.isArray(meal.ingredients) ? meal.ingredients : [];
 
           function section(title, items, isPlat) {
             const wrap = document.createElement("div");
@@ -183,25 +190,34 @@
             wrap.appendChild(h);
             const content = document.createElement("div");
             content.className = "text-muted small";
-            if (!items || !items.length) {
-              content.textContent = "—";
-            } else {
-              items.forEach((it, idx) => {
-                const row = document.createElement("div");
-                if (isPlat) {
-                  const a = document.createElement("a");
-                  a.href = "https://www.google.com/search?q=" + encodeURIComponent(String(it));
-                  a.target = "_blank";
-                  a.rel = "noopener noreferrer";
-                  a.textContent = String(it);
-                  row.textContent = "• ";
-                  row.appendChild(a);
-                } else {
-                  row.textContent = "• " + String(it);
-                }
-                content.appendChild(row);
-              });
-            }
+              if (!items || !items.length) {
+                content.textContent = "—";
+              } else {
+                items.forEach((it) => {
+                  const row = document.createElement("div");
+                  if (isPlat && meal.mealie_slug) {
+                    const a = document.createElement("a");
+                    const base = "{{ mealie_url }}";
+                    a.href = `${base}/g/home/r/${encodeURIComponent(meal.mealie_slug)}`;
+                    a.target = "_blank";
+                    a.rel = "noopener noreferrer";
+                    a.textContent = String(it);
+                    row.textContent = "• ";
+                    row.appendChild(a);
+                  } else if (isPlat) {
+                    const a = document.createElement("a");
+                    a.href = "https://www.google.com/search?q=" + encodeURIComponent(String(it));
+                    a.target = "_blank";
+                    a.rel = "noopener noreferrer";
+                    a.textContent = String(it);
+                    row.textContent = "• ";
+                    row.appendChild(a);
+                  } else {
+                    row.textContent = "• " + String(it);
+                  }
+                  content.appendChild(row);
+                });
+              }
             wrap.appendChild(content);
             return wrap;
           }
@@ -280,6 +296,38 @@
           const newMeal = resp.meal || resp;
           planningData[idx] = newMeal;
           renderPlanning(planningData, idx);
+          computeAllIngredients(planningData);
+        } catch (e) {
+          err.style.display = "block";
+          err.textContent = "Génération impossible: " + (e && e.message ? e.message : e);
+        } finally {
+          if (rowEl) rowEl.classList.remove("loading");
+        }
+      }
+
+      async function regenerateMealMealie(idx, rowEl) {
+        err.style.display = "none";
+        const meal = planningData[idx];
+        if (!meal) return;
+        if (rowEl) rowEl.classList.add("loading");
+        try {
+          const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/regenerate-mealie`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jour: meal.jour, repas: meal.repas })
+          });
+          if (!r.ok) {
+            let detail = r.status;
+            try {
+              const payload = await r.json();
+              if (payload && payload.detail) detail = payload.detail;
+            } catch (_) {}
+            throw new Error(detail);
+          }
+          const resp = await r.json();
+          const newMeal = resp.meal || resp;
+          planningData[idx] = newMeal;
+          renderPlanning(planningData);
           computeAllIngredients(planningData);
         } catch (e) {
           err.style.display = "block";

@@ -22,17 +22,28 @@ TEMPLATES_DIR = APP_DIR / "templates"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 BUFFER_DIR = DATA_DIR / "buffers"
 BUFFER_DIR.mkdir(parents=True, exist_ok=True)
+MEALIE_BUFFER_FILE = BUFFER_DIR / "mealie_buffer.json"
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 app = FastAPI(title="Meal Planning")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+MEALIE_URL = os.getenv("MEALIE_URL", "").rstrip("/")
+MEALIE_TOKEN = os.getenv("MEALIE_TOKEN", "")
 
 logger = logging.getLogger("meal_planning")
 if not logger.handlers:
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
+
+
+@app.on_event("startup")
+async def _startup_refresh_mealie():
+    try:
+        _refresh_mealie_buffer()
+    except Exception as e:
+        logger.warning("Failed to refresh Mealie buffer: %s", e)
 
 
 def _validate_date_str(monday: str) -> None:
@@ -228,14 +239,6 @@ suivivant cet exemple de json:
       "huile d'olive",
       "sel"
     ],
-    "courses": [
-      "courge",
-      "carottes",
-      "poireaux",
-      "pommes de terre",
-      "pain",
-      "fromage"
-    ],
     "duree_preparation_minutes": 30,
     "restes": [
       "Soupe de légumes"
@@ -289,13 +292,30 @@ def _generate_meal(monday: str, day: str, repas: str, planning: List[Dict[str, A
     return _normalize_meal(day, repas, meal)
 
 
+def _generate_mealie_meal(monday: str, day: str, repas: str) -> Dict[str, Any]:
+    recipe = _pop_mealie_recipe()
+    if not recipe:
+        raise HTTPException(status_code=503, detail="Aucune recette Mealie disponible")
+    meal = {
+        "jour": day,
+        "repas": repas,
+        "plats": [recipe.get("name", "")] if recipe.get("name") else [],
+        "ingredients": recipe.get("ingredients") or [],
+        "courses": recipe.get("ingredients") or [],
+        "duree_preparation_minutes": recipe.get("duree_preparation_minutes"),
+        "restes": [],
+        "mealie_slug": recipe.get("slug"),
+    }
+    return _normalize_meal(day, repas, meal)
+
+
 def _normalize_meal(day: str, repas: str, meal: Dict[str, Any]) -> Dict[str, Any]:
     meal = dict(meal or {})
     meal["jour"] = day
     meal["repas"] = repas
     meal["plats"] = meal.get("plats") if isinstance(meal.get("plats"), list) else []
-    meal["ingredients"] = meal.get("ingredients") if isinstance(meal.get("ingredients"), list) else []
-    meal["courses"] = meal.get("courses") if isinstance(meal.get("courses"), list) else meal.get("courses", [])
+    meal["courses"] = _coalesce_courses(meal)
+    meal["ingredients"] = meal["courses"]
     meal["restes"] = meal.get("restes") if isinstance(meal.get("restes"), list) else []
     if not isinstance(meal.get("duree_preparation_minutes"), (int, float)):
         meal["duree_preparation_minutes"] = None
@@ -305,10 +325,7 @@ def _normalize_meal(day: str, repas: str, meal: Dict[str, Any]) -> Dict[str, Any
 
 
 def _meal_ingredients(meal: Dict[str, Any]) -> List[str]:
-    src = meal.get("courses") if isinstance(meal.get("courses"), list) else meal.get("ingredients")
-    if not isinstance(src, list):
-        return []
-    return [str(x).strip() for x in src if isinstance(x, str) and str(x).strip()]
+    return _coalesce_courses(meal)
 
 
 def _compute_notes_from_planning(monday: str) -> Dict[str, str]:
@@ -394,14 +411,6 @@ Retourne un tableau JSON, avec un objet par repas du soir (jour, repas=soir) pou
       "fromage",
       "huile d'olive",
       "sel"
-    ],
-    "courses": [
-      "courge",
-      "carottes",
-      "poireaux",
-      "pommes de terre",
-      "pain",
-      "fromage"
     ],
     "duree_preparation_minutes": 30,
     "restes": [
@@ -500,7 +509,6 @@ Réponds par un tableau JSON de 15 objets, format:
   "repas": "soir",
   "plats": [...],
   "ingredients": [...],
-  "courses": [...],
   "duree_preparation_minutes": 30,
   "restes": [...]
 }
@@ -580,6 +588,7 @@ def get_planning(request: Request, monday: str):
             {
                 "request": request,
                 "monday": monday,
+                "mealie_url": MEALIE_URL,
             },
         )
 
@@ -593,6 +602,7 @@ def get_planning(request: Request, monday: str):
         {
             "request": request,
             "monday": monday,
+            "mealie_url": MEALIE_URL,
         },
     )
 
@@ -728,9 +738,166 @@ async def regenerate_meal(request: Request, monday: str):
     return JSONResponse(content={"meal": new_meal, "monday": monday})
 
 
+@app.post("/meal-planning/{monday}/regenerate-mealie")
+async def regenerate_mealie(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    day = (body.get("jour") or body.get("day") or "").strip().lower()
+    repas = (body.get("repas") or "soir").strip().lower()
+    if not day:
+        raise HTTPException(status_code=400, detail="Missing jour/day")
+
+    planning = _load_planning(monday)
+    new_meal = _generate_mealie_meal(monday, day, repas)
+    old_meal: Optional[Dict[str, Any]] = None
+
+    replaced = False
+    for i, m in enumerate(planning):
+        if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
+            old_meal = m
+            planning[i] = new_meal
+            replaced = True
+            break
+    if not replaced:
+        planning.append(new_meal)
+    _save_planning(monday, planning)
+    try:
+        _update_shopping_list_after_substitution(monday, old_meal, new_meal)
+    except HTTPException:
+        pass
+    return JSONResponse(content={"meal": new_meal, "monday": monday})
+
+
 @app.post("/meal-planning/{monday}/generate-week")
 def generate_week(monday: str):
     _validate_date_str(monday)
     planning = _generate_week(monday)
     _save_planning(monday, planning)
     return JSONResponse(status_code=201, content={"monday": monday, "planning": planning})
+def _coalesce_courses(meal: Dict[str, Any]) -> List[str]:
+    raw = meal.get("courses")
+    if not isinstance(raw, list):
+        raw = meal.get("ingredients")
+    if not isinstance(raw, list):
+        return []
+    seen = set()
+    out: List[str] = []
+    for x in raw:
+        if not isinstance(x, str):
+            continue
+        v = x.strip()
+        if not v:
+            continue
+        if v.lower() in seen:
+            continue
+        seen.add(v.lower())
+        out.append(v)
+    return out
+
+
+def _parse_duration_minutes(raw: Optional[str]) -> Optional[int]:
+    if not raw or not isinstance(raw, str):
+        return None
+    txt = raw.lower()
+    total = 0
+    m = re.findall(r"(\d+)\s*(heure|heures|h)", txt)
+    for val, _ in m:
+        total += int(val) * 60
+    m2 = re.findall(r"(\d+)\s*(minute|minutes|min)", txt)
+    for val, _ in m2:
+        total += int(val)
+    return total or None
+
+
+def _load_mealie_buffer() -> List[Dict[str, Any]]:
+    if not MEALIE_BUFFER_FILE.exists():
+        return []
+    try:
+        data = json.loads(MEALIE_BUFFER_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("Mealie buffer corrupted, resetting")
+        return []
+    if not isinstance(data, list):
+        return []
+    return [x for x in data if isinstance(x, dict)]
+
+
+def _save_mealie_buffer(entries: List[Dict[str, Any]]) -> None:
+    MEALIE_BUFFER_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _fetch_mealie_recipe_detail(slug: str) -> Optional[Dict[str, Any]]:
+    if not MEALIE_URL or not MEALIE_TOKEN:
+        return None
+    url = f"{MEALIE_URL}/api/recipes/{slug}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {MEALIE_TOKEN}", "accept": "application/json"}, timeout=30)
+    if r.status_code != 200:
+        return None
+    try:
+        return r.json()
+    except Exception:
+        return None
+
+
+def _refresh_mealie_buffer() -> None:
+    if not MEALIE_URL or not MEALIE_TOKEN:
+        logger.info("MEALIE_URL or MEALIE_TOKEN not set, skipping Mealie buffer refresh")
+        return
+    per_page = 50
+    page = 1
+    dedup: Dict[str, Dict[str, Any]] = {}
+    headers = {"Authorization": f"Bearer {MEALIE_TOKEN}", "accept": "application/json"}
+    while True:
+        url = f"{MEALIE_URL}/api/recipes?orderDirection=desc&page={page}&perPage={per_page}&requireAllCategories=false&requireAllTags=false&requireAllTools=false&requireAllFoods=false"
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200:
+            logger.warning("Failed to fetch Mealie page %s: %s", page, r.text)
+            break
+        payload = r.json()
+        items = payload.get("items") or []
+        if not items:
+            break
+        for it in items:
+            name = str(it.get("name") or "").strip()
+            slug = str(it.get("slug") or "").strip()
+            if not name or not slug:
+                continue
+            key = name.lower()
+            if key in dedup:
+                continue
+            detail = _fetch_mealie_recipe_detail(slug) or {}
+            ing = []
+            for rec in detail.get("recipeIngredient") or []:
+                note = rec.get("display") or rec.get("note") or ""
+                note = str(note).strip()
+                if note:
+                    ing.append(note)
+            duree = _parse_duration_minutes(detail.get("totalTime") or it.get("totalTime"))
+            dedup[key] = {
+                "name": name,
+                "slug": slug,
+                "ingredients": ing,
+                "duree_preparation_minutes": duree,
+            }
+        total_pages = payload.get("total_pages") or payload.get("totalPages") or page
+        if page >= total_pages:
+            break
+        page += 1
+    entries = list(dedup.values())
+    _save_mealie_buffer(entries)
+    logger.info("Mealie buffer refreshed with %s recipes", len(entries))
+
+
+def _pop_mealie_recipe() -> Optional[Dict[str, Any]]:
+    buf = _load_mealie_buffer()
+    if not buf:
+        _refresh_mealie_buffer()
+        buf = _load_mealie_buffer()
+    if not buf:
+        return None
+    recipe = buf.pop(0)
+    _save_mealie_buffer(buf)
+    return recipe
