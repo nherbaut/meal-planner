@@ -673,9 +673,13 @@ async def create_shopping_list(request: Request, monday: str):
 def shopping_list(request: Request, monday: str):
     _validate_date_str(monday)
     payload = _load_shopping_list(monday)
+    try:
+        planning = _load_planning(monday)
+    except HTTPException:
+        planning = []
 
     if _wants_json(request):
-        return JSONResponse(content={"monday": monday, **payload})
+        return JSONResponse(content={"monday": monday, **payload, "planning": planning})
 
     return templates.TemplateResponse(
         "shopping_list.html",
@@ -684,6 +688,7 @@ def shopping_list(request: Request, monday: str):
             "to_buy": payload["to_buy"],
             "bought": payload["bought"],
             "notes": payload.get("notes", {}),
+            "planning": planning,
             "monday": monday,
         },
     )

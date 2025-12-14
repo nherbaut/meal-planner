@@ -13,7 +13,13 @@
         <a class="text-decoration-none" href="/meal-planning/{{ monday }}">Retour au planning</a>
       </div>
       <div id="err" class="text-danger small mb-2" style="display:none;"></div>
-      <div class="row g-3">
+      <div class="d-flex align-items-center gap-2 mb-3">
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" id="toggleView" />
+          <label class="form-check-label" for="toggleView">Vue par jour</label>
+        </div>
+      </div>
+      <div id="standardView" class="row g-3">
         <div class="col-12 col-lg-6">
           <div class="card shadow-sm">
             <div class="card-body">
@@ -39,6 +45,12 @@
           </div>
         </div>
       </div>
+
+      <div id="perDayView" class="row g-3" style="display:none;">
+        <div class="col-12">
+          <div class="accordion" id="perDayAcc"></div>
+        </div>
+      </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -54,6 +66,11 @@
       const toBuyCount = document.getElementById("toBuyCount");
       const boughtCount = document.getElementById("boughtCount");
       const err = document.getElementById("err");
+      const toggleView = document.getElementById("toggleView");
+      const standardView = document.getElementById("standardView");
+      const perDayView = document.getElementById("perDayView");
+      const perDayAcc = document.getElementById("perDayAcc");
+      const planningData = {{ planning|tojson }};
 
       const toBuy = new Set();
       const bought = new Set();
@@ -152,12 +169,101 @@
 
       renderLists();
 
+      function renderPerDay() {
+        perDayAcc.innerHTML = "";
+        if (!Array.isArray(planningData) || planningData.length === 0) {
+          perDayAcc.innerHTML = '<div class="text-muted small">Pas de planning chargé.</div>';
+          return;
+        }
+        const order = new Map([["lundi", 1], ["mardi", 2], ["mercredi", 3], ["jeudi", 4], ["vendredi", 5], ["samedi", 6], ["dimanche", 7]]);
+        const buySet = new Set([...toBuy].map(x => x.toLowerCase()));
+        const boughtSet = new Set([...bought].map(x => x.toLowerCase()));
+        const items = planningData
+          .filter(m => (m.repas || "").toLowerCase() === "soir")
+          .map((m, idx) => ({ meal: m, idx }))
+          .sort((a, b) => (order.get((a.meal.jour || "").toLowerCase()) || 999) - (order.get((b.meal.jour || "").toLowerCase()) || 999));
+
+        items.forEach(({ meal }, i) => {
+          const itemId = `day-${i}`;
+          const card = document.createElement("div");
+          card.className = "accordion-item";
+
+          const h = document.createElement("h2");
+          h.className = "accordion-header";
+          const btn = document.createElement("button");
+          btn.className = "accordion-button collapsed";
+          btn.type = "button";
+          btn.setAttribute("data-bs-toggle", "collapse");
+          btn.setAttribute("data-bs-target", `#${itemId}`);
+          btn.innerHTML = `<div class="me-2 fw-semibold text-capitalize">${meal.jour || ""}</div><div class="small text-muted">${(Array.isArray(meal.plats) ? meal.plats.join(", ") : "")}</div>`;
+          h.appendChild(btn);
+          card.appendChild(h);
+
+          const body = document.createElement("div");
+          body.id = itemId;
+          body.className = "accordion-collapse collapse";
+
+          const inner = document.createElement("div");
+          inner.className = "accordion-body";
+          const ing = Array.isArray(meal.ingredients) ? meal.ingredients : (Array.isArray(meal.courses) ? meal.courses : []);
+          if (!ing.length) {
+            inner.innerHTML = '<div class="text-muted small">Aucun ingrédient.</div>';
+          } else {
+            ing.forEach(val => {
+              const norm = String(val || "").toLowerCase();
+              const row = document.createElement("div");
+              row.className = "d-flex justify-content-between align-items-center border rounded p-2 mb-2";
+              const left = document.createElement("div");
+              left.className = "d-flex flex-column";
+              const label = document.createElement("span");
+              label.textContent = val;
+              left.appendChild(label);
+              if (notes && notes[norm]) {
+                const note = document.createElement("span");
+                note.className = "text-muted small fst-italic";
+                note.textContent = notes[norm];
+                left.appendChild(note);
+              }
+              const badge = document.createElement("span");
+              if (boughtSet.has(norm)) {
+                badge.className = "badge bg-success";
+                badge.textContent = "Acheté";
+              } else if (buySet.has(norm)) {
+                badge.className = "badge bg-primary";
+                badge.textContent = "À acheter";
+              } else {
+                badge.className = "badge bg-secondary";
+                badge.textContent = "Non prévu";
+              }
+              row.appendChild(left);
+              row.appendChild(badge);
+              inner.appendChild(row);
+            });
+          }
+          body.appendChild(inner);
+          card.appendChild(body);
+          perDayAcc.appendChild(card);
+        });
+      }
+
+      toggleView.addEventListener("change", () => {
+        if (toggleView.checked) {
+          standardView.style.display = "none";
+          perDayView.style.display = "flex";
+          renderPerDay();
+        } else {
+          perDayView.style.display = "none";
+          standardView.style.display = "flex";
+        }
+      });
+
       async function persist() {
         setError("");
         try {
           const payload = {
             to_buy: [...toBuy],
             bought: [...bought],
+            notes: notes,
           };
           const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/shopping-list`, {
             method: "POST",
