@@ -155,20 +155,18 @@
           topRow.appendChild(dur);
 
           const btnNew = document.createElement("button");
-          btnNew.className = "btn btn-outline-primary btn-sm";
+          btnNew.className = "btn btn-outline-primary btn-sm position-relative";
           btnNew.type = "button";
-          btnNew.textContent = "Nouveau repas";
+          btnNew.textContent = "Substituer le repas";
+          const badgeAI = document.createElement("span");
+          badgeAI.className = "position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger";
+          badgeAI.textContent = "IA";
+          badgeAI.innerHTML += '<span class="visually-hidden">IA</span>';
+          btnNew.appendChild(badgeAI);
           btnNew.addEventListener("click", () => regenerateMeal(idx, card));
           topRow.appendChild(btnNew);
 
-          const btnIng = document.createElement("button");
-          btnIng.className = "btn btn-outline-secondary btn-sm";
-          btnIng.type = "button";
-          btnIng.textContent = "Ingrédients";
-          btnIng.setAttribute("data-bs-toggle", "popover");
-          btnIng.setAttribute("data-bs-html", "true");
-          btnIng.setAttribute("data-bs-content", ingredientPopoverContent(meal));
-          topRow.appendChild(btnIng);
+          
 
           inner.appendChild(topRow);
 

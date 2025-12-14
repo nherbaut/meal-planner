@@ -26,7 +26,13 @@
             <div class="d-flex gap-2 mb-2">
               <button type="button" class="btn btn-outline-secondary" id="validate">Valider JSON</button>
               <button type="submit" class="btn btn-primary">Envoyer</button>
-              <button type="button" class="btn btn-success" id="generate">Générer automatiquement</button>
+              <button type="button" class="btn btn-success position-relative" id="generate">
+                Générer automatiquement
+                <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
+                  IA
+                  <span class="visually-hidden">IA</span>
+                </span>
+              </button>
             </div>
             <div class="small" id="msg" style="display:none;"></div>
           </form>

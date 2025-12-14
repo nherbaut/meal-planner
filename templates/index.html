@@ -30,31 +30,44 @@
             </ul>
           {% endif %}
 
-          <div class="row g-2 align-items-center mb-2">
-            <div class="col-auto">
-              <label class="form-label mb-0">Nouveau lundi</label>
-            </div>
-            <div class="col-sm-4 col-7">
-              <input class="form-control" id="monday" placeholder="YYYY-MM-DD" inputmode="numeric" />
-            </div>
-            <div class="col-auto">
-              <button class="btn btn-primary" id="go">Ouvrir / créer</button>
-            </div>
-          </div>
-          <div class="text-muted small">Saisir la date du lundi (YYYY-MM-DD). Si aucun planning n’existe, la page permet de générer ou coller le JSON.</div>
+          <div class="mb-2 fw-semibold">Créer / ouvrir les 3 prochaines semaines</div>
+          <div class="d-flex flex-wrap gap-2" id="quickWeeks"></div>
+          <div class="text-muted small mt-2">Cliquez sur un bouton pour ouvrir ou créer la semaine correspondante.</div>
         </div>
       </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-      const monday = document.getElementById("monday");
-      const go = document.getElementById("go");
-      go.addEventListener("click", () => {
-        const v = (monday.value || "").trim();
-        if (!v) return;
-        window.location.href = "/meal-planning/" + encodeURIComponent(v);
-      });
+      const existing = {{ dates|tojson }};
+
+      function nextMondays(n) {
+        const today = new Date();
+        const day = today.getDay(); // 0=Dimanche..6=Samedi
+        const offset = (day === 0 ? 1 : 1 - day + 7); // prochain lundi (ou aujourd'hui si lundi)
+        const firstMonday = new Date(today);
+        firstMonday.setDate(today.getDate() + offset - 7); // inclure semaine courante si on veut
+        const res = [];
+        for (let i = 1; i <= n; i++) {
+          const d = new Date(firstMonday);
+          d.setDate(firstMonday.getDate() + 7 * i);
+          const iso = d.toISOString().slice(0, 10);
+          res.push(iso);
+        }
+        return res;
+      }
+
+      const quickWeeks = document.getElementById("quickWeeks");
+      nextMondays(3)
+        .filter(d => !existing.includes(d))
+        .forEach(d => {
+          const btn = document.createElement("button");
+          btn.className = "btn btn-outline-primary";
+          btn.type = "button";
+          btn.textContent = d;
+          btn.addEventListener("click", () => window.location.href = "/meal-planning/" + encodeURIComponent(d));
+          quickWeeks.appendChild(btn);
+        });
     </script>
   </body>
 </html>

@@ -67,13 +67,16 @@
       const boughtCount = document.getElementById("boughtCount");
       const err = document.getElementById("err");
       const toggleView = document.getElementById("toggleView");
-      const standardView = document.getElementById("standardView");
       const perDayView = document.getElementById("perDayView");
       const perDayAcc = document.getElementById("perDayAcc");
+      const standardView = document.getElementById("standardView");
+      const perDayAddToBuy = document.getElementById("perDayAddToBuy");
+      const perDayMarkBought = document.getElementById("perDayMarkBought");
       const planningData = {{ planning|tojson }};
 
       const toBuy = new Set();
       const bought = new Set();
+      const norm = s => String(s || "").trim().toLowerCase();
 
       for (const it of initialToBuy || []) {
         const v = String(it || "").trim();
@@ -126,12 +129,7 @@
           btn.className = "btn btn-sm btn-outline-danger";
           btn.type = "button";
           btn.textContent = "Acheté";
-          btn.addEventListener("click", () => {
-            toBuy.delete(ing);
-            bought.add(ing);
-            renderLists();
-            persist();
-          });
+          btn.addEventListener("click", () => updateItem(ing, "bought"));
           row.appendChild(span);
           row.appendChild(btn);
           toBuyDiv.appendChild(row);
@@ -155,12 +153,7 @@
           btn.className = "btn btn-sm btn-outline-success";
           btn.type = "button";
           btn.textContent = "À acheter";
-          btn.addEventListener("click", () => {
-            bought.delete(ing);
-            toBuy.add(ing);
-            renderLists();
-            persist();
-          });
+          btn.addEventListener("click", () => updateItem(ing, "to_buy"));
           row.appendChild(span);
           row.appendChild(btn);
           boughtDiv.appendChild(row);
@@ -170,14 +163,15 @@
       renderLists();
 
       function renderPerDay() {
+        const openIds = new Set(Array.from(perDayAcc.querySelectorAll(".accordion-collapse.show")).map(el => el.id));
         perDayAcc.innerHTML = "";
         if (!Array.isArray(planningData) || planningData.length === 0) {
           perDayAcc.innerHTML = '<div class="text-muted small">Pas de planning chargé.</div>';
           return;
         }
         const order = new Map([["lundi", 1], ["mardi", 2], ["mercredi", 3], ["jeudi", 4], ["vendredi", 5], ["samedi", 6], ["dimanche", 7]]);
-        const buySet = new Set([...toBuy].map(x => x.toLowerCase()));
-        const boughtSet = new Set([...bought].map(x => x.toLowerCase()));
+        const buySet = new Set([...toBuy].map(norm));
+        const boughtSet = new Set([...bought].map(norm));
         const items = planningData
           .filter(m => (m.repas || "").toLowerCase() === "soir")
           .map((m, idx) => ({ meal: m, idx }))
@@ -191,7 +185,8 @@
           const h = document.createElement("h2");
           h.className = "accordion-header";
           const btn = document.createElement("button");
-          btn.className = "accordion-button collapsed";
+          const isOpen = openIds.has(itemId);
+          btn.className = isOpen ? "accordion-button" : "accordion-button collapsed";
           btn.type = "button";
           btn.setAttribute("data-bs-toggle", "collapse");
           btn.setAttribute("data-bs-target", `#${itemId}`);
@@ -201,7 +196,7 @@
 
           const body = document.createElement("div");
           body.id = itemId;
-          body.className = "accordion-collapse collapse";
+          body.className = isOpen ? "accordion-collapse collapse show" : "accordion-collapse collapse";
 
           const inner = document.createElement("div");
           inner.className = "accordion-body";
@@ -210,7 +205,10 @@
             inner.innerHTML = '<div class="text-muted small">Aucun ingrédient.</div>';
           } else {
             ing.forEach(val => {
-              const norm = String(val || "").toLowerCase();
+              const k = norm(val);
+              if (!buySet.has(k) && !boughtSet.has(k)) {
+                return; // ignorer les ingrédients non présents dans la liste de courses
+              }
               const row = document.createElement("div");
               row.className = "d-flex justify-content-between align-items-center border rounded p-2 mb-2";
               const left = document.createElement("div");
@@ -218,33 +216,42 @@
               const label = document.createElement("span");
               label.textContent = val;
               left.appendChild(label);
-              if (notes && notes[norm]) {
+              if (notes && notes[k]) {
                 const note = document.createElement("span");
                 note.className = "text-muted small fst-italic";
-                note.textContent = notes[norm];
+                note.textContent = notes[k];
                 left.appendChild(note);
               }
-              const badge = document.createElement("span");
-              if (boughtSet.has(norm)) {
-                badge.className = "badge bg-success";
-                badge.textContent = "Acheté";
-              } else if (buySet.has(norm)) {
-                badge.className = "badge bg-primary";
-                badge.textContent = "À acheter";
-              } else {
-                badge.className = "badge bg-secondary";
-                badge.textContent = "Non prévu";
-              }
+              const btn = document.createElement("button");
+              btn.setAttribute("type", "button");
+              btn.className = boughtSet.has(k) ? "btn btn-sm btn-outline-success" : "btn btn-sm btn-outline-danger";
+              btn.textContent = boughtSet.has(k) ? "À acheter" : "Acheté";
+              btn.addEventListener("click", (evt) => {
+                evt.stopPropagation(); // éviter de replier l'accordéon
+                updateItem(val, boughtSet.has(k) ? "to_buy" : "bought");
+              });
               row.appendChild(left);
-              row.appendChild(badge);
-              inner.appendChild(row);
-            });
-          }
+              row.appendChild(btn);
+          inner.appendChild(row);
+        });
+      }
           body.appendChild(inner);
           card.appendChild(body);
           perDayAcc.appendChild(card);
+
+          if (openIds.has(itemId)) {
+            const collapse = new bootstrap.Collapse(body, { toggle: false });
+            collapse.show();
+          }
         });
       }
+
+      perDayAddToBuy?.addEventListener("click", () => {
+        // no-op placeholder: actions spécifiques si besoin
+      });
+      perDayMarkBought?.addEventListener("click", () => {
+        // no-op placeholder
+      });
 
       toggleView.addEventListener("change", () => {
         if (toggleView.checked) {
@@ -281,6 +288,22 @@
         } catch (e) {
           setError("Sauvegarde impossible: " + (e && e.message ? e.message : e));
         }
+      }
+
+      function updateItem(ing, target) {
+        const label = String(ing || "").trim();
+        const k = norm(label);
+        if (!k) return;
+        if (target === "bought") {
+          toBuy.forEach(x => { if (norm(x) === k) toBuy.delete(x); });
+          bought.add(label);
+        } else {
+          bought.forEach(x => { if (norm(x) === k) bought.delete(x); });
+          toBuy.add(label);
+        }
+        renderLists();
+        if (toggleView.checked) renderPerDay();
+        persist();
       }
     </script>
   </body>
