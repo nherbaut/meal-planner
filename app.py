@@ -6,6 +6,8 @@ import re
 import logging
 import os
 import requests
+import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -214,7 +216,14 @@ def _update_shopping_list_after_substitution(monday: str, old_meal: Optional[Dic
     _save_shopping_list(monday, to_buy_final, bought, notes)
 
 
-def _build_regen_prompt(monday: str, planning: List[Dict[str, Any]], day: str, repas: str) -> str:
+def _build_regen_prompt(
+    monday: str,
+    planning: List[Dict[str, Any]],
+    day: str,
+    repas: str,
+    mode: str = "vegetarien",
+    required_ingredients: Optional[List[str]] = None,
+) -> str:
     template = """
 aide moi à faire le menu pour un jour de la semaine. pour 2 parents  2 enfants de 3 et 7 ans mangent à la maison les soirs en semaine et le midi et soir en weekend. Les parent ramène les restes des repas des soirs pour le lendemain midi en semaine. On est en {{date}} nous sommes en france dans le sud ouest, il faut des aliments de saison Il faut des aliments qu'on peut trouver en super marché On ne veut pas d'aliments ultra-transformés Il faut que ça plaise aux enfants Pas besoin d'avoir de la viande/poisson le soir, mais des proteines végétales de bonne qualité sont appréciées. Pas besoin de prévoir le dessert Les repas doivent être préparés en moins de 45\", 30\" idéalement 
 
@@ -248,7 +257,14 @@ suivivant cet exemple de json:
 
 les repas devraient être variés par rapport à la liste des repas existant, {{json}}
 """
-    extra = f"\nGénère exactement un objet JSON pour le jour '{day}' et le repas '{repas}', au format de l'exemple ci-dessus, sans texte additionnel."
+    mode_hint = ""
+    if mode == "gourmand":
+        mode_hint = "\nVersion gourmande: plus savoureux, viande ou poisson autorisés, tout en restant de saison."
+    elif mode == "inspire":
+        req = [x for x in (required_ingredients or []) if x]
+        if req:
+            mode_hint = "\nInspiration: inclure obligatoirement ces ingrédients: " + ", ".join(req) + "."
+    extra = f"\nGénère exactement un objet JSON pour le jour '{day}' et le repas '{repas}', au format de l'exemple ci-dessus, sans texte additionnel." + mode_hint
     return template.replace("{{date}}", monday).replace("{{json}}", json.dumps(planning, ensure_ascii=False, indent=2)) + extra
 
 
@@ -280,12 +296,58 @@ def _extract_json_from_text(text: str) -> Dict[str, Any]:
     return json.loads(snippet)
 
 
-def _generate_meal(monday: str, day: str, repas: str, planning: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _call_openai(prompt: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY")
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Tu es un générateur JSON strict. Tu réponds uniquement avec le JSON demandé, sans texte additionnel, sans balises Markdown, sans ```.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+    logger.info("OpenAI request (single) model=%s", OPENAI_MODEL)
+    logger.info("OpenAI payload (single): %s", json.dumps(payload, ensure_ascii=False))
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=180,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI request failed: {e}") from e
+    logger.info("OpenAI response (single) status=%s", r.status_code)
+    logger.info("OpenAI body (single): %s", r.text)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {detail}")
+    data = r.json()
+    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+
+def _generate_meal(
+    monday: str,
+    day: str,
+    repas: str,
+    planning: List[Dict[str, Any]],
+    mode: str = "vegetarien",
+    required_ingredients: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     buffer_meals = _load_meal_buffer(monday)
-    if not buffer_meals:
+    if not buffer_meals or mode != "vegetarien" or required_ingredients:
         logger.info("Meal buffer empty for %s, generating new pool", monday)
-        buffer_meals = _generate_meal_pool(monday, planning)
-        _save_meal_buffer(monday, buffer_meals)
+        prompt = _build_regen_prompt(monday, planning, day, repas, mode=mode, required_ingredients=required_ingredients)
+        resp = _call_openai(prompt)
+        meal = _extract_json_from_text(resp)
+        return _normalize_meal(day, repas, meal)
 
     meal = buffer_meals.pop(0)
     _save_meal_buffer(monday, buffer_meals)
@@ -296,7 +358,12 @@ def _generate_mealie_meal(monday: str, day: str, repas: str) -> Dict[str, Any]:
     recipe = _pop_mealie_recipe()
     if not recipe:
         raise HTTPException(status_code=503, detail="Aucune recette Mealie disponible")
-    meal = {
+    meal = _mealie_recipe_to_meal(recipe, day, repas)
+    return _normalize_meal(day, repas, meal)
+
+
+def _mealie_recipe_to_meal(recipe: Dict[str, Any], day: str, repas: str) -> Dict[str, Any]:
+    return {
         "jour": day,
         "repas": repas,
         "plats": [recipe.get("name", "")] if recipe.get("name") else [],
@@ -306,7 +373,102 @@ def _generate_mealie_meal(monday: str, day: str, repas: str) -> Dict[str, Any]:
         "restes": [],
         "mealie_slug": recipe.get("slug"),
     }
-    return _normalize_meal(day, repas, meal)
+
+
+def _dedupe_strings(items: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        val = item.strip()
+        if not val:
+            continue
+        key = val.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(val)
+    return out
+
+
+def _append_mealie_dish(meal: Dict[str, Any], recipe: Dict[str, Any]) -> Dict[str, Any]:
+    name = str(recipe.get("name") or "").strip()
+    if not name:
+        return meal
+    plats = meal.get("plats") if isinstance(meal.get("plats"), list) else []
+    plats = [x for x in plats if isinstance(x, str)]
+    if name not in plats:
+        plats.append(name)
+    meal["plats"] = plats
+
+    ing = recipe.get("ingredients") or []
+    ing = [x for x in ing if isinstance(x, str)]
+    current = meal.get("courses") if isinstance(meal.get("courses"), list) else meal.get("ingredients") or []
+    current = [x for x in current if isinstance(x, str)]
+    meal["courses"] = _dedupe_strings(current + ing)
+    meal["ingredients"] = meal["courses"]
+
+    restes = meal.get("restes") if isinstance(meal.get("restes"), list) else []
+    restes = [x for x in restes if isinstance(x, str)]
+    if name not in restes:
+        restes.append(name)
+    meal["restes"] = restes
+
+    mealie_dishes = meal.get("mealie_dishes")
+    if not isinstance(mealie_dishes, list):
+        mealie_dishes = []
+    exists = any(isinstance(d, dict) and str(d.get("name") or "") == name for d in mealie_dishes)
+    if not exists:
+        mealie_dishes.append(
+            {
+                "name": name,
+                "slug": recipe.get("slug"),
+                "ingredients": ing,
+            }
+        )
+    meal["mealie_dishes"] = mealie_dishes
+    return meal
+
+
+def _remove_mealie_dish(meal: Dict[str, Any], dish: str) -> Dict[str, Any]:
+    target = dish.strip().lower()
+    plats = meal.get("plats") if isinstance(meal.get("plats"), list) else []
+    plats = [x for x in plats if isinstance(x, str)]
+    meal["plats"] = [p for p in plats if p.strip().lower() != target]
+
+    restes = meal.get("restes") if isinstance(meal.get("restes"), list) else []
+    restes = [x for x in restes if isinstance(x, str)]
+    meal["restes"] = [r for r in restes if r.strip().lower() != target]
+
+    mealie_dishes = meal.get("mealie_dishes")
+    if isinstance(mealie_dishes, list):
+        kept = []
+        removed_ingredients: List[str] = []
+        for d in mealie_dishes:
+            if not isinstance(d, dict):
+                continue
+            name = str(d.get("name") or "").strip()
+            if name.strip().lower() == target:
+                removed_ingredients.extend([x for x in d.get("ingredients") or [] if isinstance(x, str)])
+                continue
+            kept.append(d)
+        meal["mealie_dishes"] = kept
+        if removed_ingredients:
+            current = meal.get("courses") if isinstance(meal.get("courses"), list) else meal.get("ingredients") or []
+            current = [x for x in current if isinstance(x, str)]
+            remove_keys = {x.strip().lower() for x in removed_ingredients if isinstance(x, str)}
+            filtered = [x for x in current if x.strip().lower() not in remove_keys]
+            meal["courses"] = _dedupe_strings(filtered)
+            meal["ingredients"] = meal["courses"]
+
+    if not meal.get("plats"):
+        meal["restes"] = []
+        meal["courses"] = []
+        meal["ingredients"] = []
+        meal["mealie_dishes"] = []
+
+    return meal
 
 
 def _normalize_meal(day: str, repas: str, meal: Dict[str, Any]) -> Dict[str, Any]:
@@ -713,11 +875,18 @@ async def regenerate_meal(request: Request, monday: str):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     day = (body.get("jour") or body.get("day") or "").strip().lower()
     repas = (body.get("repas") or "soir").strip().lower()
+    mode = (body.get("mode") or "vegetarien").strip().lower()
+    ingredients = body.get("ingredients") or body.get("ingredients_text") or ""
+    required: Optional[List[str]] = None
+    if isinstance(ingredients, list):
+        required = [str(x).strip() for x in ingredients if str(x).strip()]
+    elif isinstance(ingredients, str) and ingredients.strip():
+        required = [x.strip() for x in ingredients.split(",") if x.strip()]
     if not day:
         raise HTTPException(status_code=400, detail="Missing jour/day")
 
     planning = _load_planning(monday)
-    new_meal = _generate_meal(monday, day, repas, planning)
+    new_meal = _generate_meal(monday, day, repas, planning, mode=mode, required_ingredients=required)
     old_meal: Optional[Dict[str, Any]] = None
 
     replaced = False
@@ -751,7 +920,173 @@ async def regenerate_mealie(request: Request, monday: str):
         raise HTTPException(status_code=400, detail="Missing jour/day")
 
     planning = _load_planning(monday)
-    new_meal = _generate_mealie_meal(monday, day, repas)
+    recipe = _pop_mealie_recipe()
+    if not recipe:
+        raise HTTPException(status_code=503, detail="Aucune recette Mealie disponible")
+    old_meal: Optional[Dict[str, Any]] = None
+    new_meal: Dict[str, Any]
+
+    replaced = False
+    for i, m in enumerate(planning):
+        if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
+            old_meal = copy.deepcopy(m)
+            updated = copy.deepcopy(m)
+            _append_mealie_dish(updated, recipe)
+            new_meal = _normalize_meal(day, repas, updated)
+            planning[i] = new_meal
+            replaced = True
+            break
+    if not replaced:
+        base = _normalize_meal(day, repas, {"jour": day, "repas": repas, "plats": [], "ingredients": [], "restes": []})
+        _append_mealie_dish(base, recipe)
+        new_meal = base
+        planning.append(new_meal)
+    _save_planning(monday, planning)
+    try:
+        _update_shopping_list_after_substitution(monday, old_meal, new_meal)
+    except HTTPException:
+        pass
+    return JSONResponse(content={"meal": new_meal, "monday": monday})
+
+
+@app.post("/meal-planning/{monday}/add-mealie-dish")
+async def add_mealie_dish(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    day = (body.get("jour") or body.get("day") or "").strip().lower()
+    repas = (body.get("repas") or "soir").strip().lower()
+    slug = (body.get("slug") or "").strip()
+    name = (
+        body.get("name")
+        or body.get("recipe_name")
+        or body.get("recette")
+        or body.get("receipt")
+        or ""
+    )
+    name = str(name).strip()
+    if not day:
+        raise HTTPException(status_code=400, detail="Missing jour/day")
+    if not slug and not name:
+        raise HTTPException(status_code=400, detail="Missing recipe slug or name")
+
+    recipe = _lookup_mealie_recipe(slug=slug, name=name)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
+
+    planning = _load_planning(monday)
+    old_meal: Optional[Dict[str, Any]] = None
+    new_meal: Dict[str, Any]
+
+    replaced = False
+    for i, m in enumerate(planning):
+        if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
+            old_meal = copy.deepcopy(m)
+            updated = copy.deepcopy(m)
+            _append_mealie_dish(updated, recipe)
+            new_meal = _normalize_meal(day, repas, updated)
+            planning[i] = new_meal
+            replaced = True
+            break
+    if not replaced:
+        base = _normalize_meal(day, repas, {"jour": day, "repas": repas, "plats": [], "ingredients": [], "restes": []})
+        _append_mealie_dish(base, recipe)
+        new_meal = base
+        planning.append(new_meal)
+    _save_planning(monday, planning)
+    try:
+        _update_shopping_list_after_substitution(monday, old_meal, new_meal)
+    except HTTPException:
+        pass
+    return JSONResponse(content={"meal": new_meal, "monday": monday})
+
+
+@app.post("/meal-planning/{monday}/remove-dish")
+async def remove_dish(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    day = (body.get("jour") or body.get("day") or "").strip().lower()
+    repas = (body.get("repas") or "soir").strip().lower()
+    dish = str(body.get("dish") or body.get("plat") or "").strip()
+    if not day:
+        raise HTTPException(status_code=400, detail="Missing jour/day")
+    if not dish:
+        raise HTTPException(status_code=400, detail="Missing dish")
+
+    planning = _load_planning(monday)
+    old_meal: Optional[Dict[str, Any]] = None
+    new_meal: Optional[Dict[str, Any]] = None
+
+    for i, m in enumerate(planning):
+        if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
+            old_meal = copy.deepcopy(m)
+            updated = copy.deepcopy(m)
+            _remove_mealie_dish(updated, dish)
+            new_meal = _normalize_meal(day, repas, updated)
+            planning[i] = new_meal
+            break
+    if new_meal is None:
+        raise HTTPException(status_code=404, detail="Meal not found")
+
+    _save_planning(monday, planning)
+    try:
+        _update_shopping_list_after_substitution(monday, old_meal, new_meal)
+    except HTTPException:
+        pass
+    return JSONResponse(content={"meal": new_meal, "monday": monday})
+
+
+@app.post("/meal-planning/{monday}/generate-week")
+def generate_week(monday: str):
+    _validate_date_str(monday)
+    planning = _generate_week(monday)
+    _save_planning(monday, planning)
+    return JSONResponse(status_code=201, content={"monday": monday, "planning": planning})
+
+
+@app.get("/mealie/recipes")
+def list_mealie_recipes():
+    entries = _load_mealie_buffer()
+    if not entries:
+        _refresh_mealie_buffer()
+        entries = _load_mealie_buffer()
+    return JSONResponse(content=entries)
+
+
+@app.post("/meal-planning/{monday}/inject-mealie")
+async def inject_mealie(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    day = (body.get("jour") or body.get("day") or "").strip().lower()
+    repas = (body.get("repas") or "soir").strip().lower()
+    slug = (body.get("slug") or "").strip()
+    name = (
+        body.get("name")
+        or body.get("recipe_name")
+        or body.get("recette")
+        or body.get("receipt")
+        or ""
+    )
+    name = str(name).strip()
+    if not day:
+        raise HTTPException(status_code=400, detail="Missing jour/day")
+    if not slug and not name:
+        raise HTTPException(status_code=400, detail="Missing recipe slug or name")
+
+    recipe = _lookup_mealie_recipe(slug=slug, name=name)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
+
+    planning = _load_planning(monday)
+    new_meal = _mealie_recipe_to_meal(recipe, day, repas)
     old_meal: Optional[Dict[str, Any]] = None
 
     replaced = False
@@ -769,14 +1104,6 @@ async def regenerate_mealie(request: Request, monday: str):
     except HTTPException:
         pass
     return JSONResponse(content={"meal": new_meal, "monday": monday})
-
-
-@app.post("/meal-planning/{monday}/generate-week")
-def generate_week(monday: str):
-    _validate_date_str(monday)
-    planning = _generate_week(monday)
-    _save_planning(monday, planning)
-    return JSONResponse(status_code=201, content={"monday": monday, "planning": planning})
 def _coalesce_courses(meal: Dict[str, Any]) -> List[str]:
     raw = meal.get("courses")
     if not isinstance(raw, list):
@@ -850,42 +1177,65 @@ def _refresh_mealie_buffer() -> None:
     page = 1
     dedup: Dict[str, Dict[str, Any]] = {}
     headers = {"Authorization": f"Bearer {MEALIE_TOKEN}", "accept": "application/json"}
-    while True:
-        url = f"{MEALIE_URL}/api/recipes?orderDirection=desc&page={page}&perPage={per_page}&requireAllCategories=false&requireAllTags=false&requireAllTools=false&requireAllFoods=false"
-        r = requests.get(url, headers=headers, timeout=30)
-        if r.status_code != 200:
-            logger.warning("Failed to fetch Mealie page %s: %s", page, r.text)
-            break
-        payload = r.json()
-        items = payload.get("items") or []
-        if not items:
-            break
-        for it in items:
-            name = str(it.get("name") or "").strip()
-            slug = str(it.get("slug") or "").strip()
-            if not name or not slug:
-                continue
-            key = name.lower()
-            if key in dedup:
-                continue
-            detail = _fetch_mealie_recipe_detail(slug) or {}
-            ing = []
-            for rec in detail.get("recipeIngredient") or []:
-                note = rec.get("display") or rec.get("note") or ""
-                note = str(note).strip()
-                if note:
-                    ing.append(note)
-            duree = _parse_duration_minutes(detail.get("totalTime") or it.get("totalTime"))
-            dedup[key] = {
-                "name": name,
-                "slug": slug,
-                "ingredients": ing,
-                "duree_preparation_minutes": duree,
-            }
-        total_pages = payload.get("total_pages") or payload.get("totalPages") or page
-        if page >= total_pages:
-            break
-        page += 1
+    workers_env = os.getenv("MEALIE_FETCH_WORKERS", "8")
+    try:
+        workers = max(1, int(workers_env))
+    except ValueError:
+        workers = 8
+
+    def build_entry(name: str, slug: str, total_time: Optional[str]) -> Optional[Dict[str, Any]]:
+        detail = _fetch_mealie_recipe_detail(slug) or {}
+        ing = []
+        for rec in detail.get("recipeIngredient") or []:
+            note = rec.get("display") or rec.get("note") or ""
+            note = str(note).strip()
+            if note:
+                ing.append(note)
+        duree = _parse_duration_minutes(detail.get("totalTime") or total_time)
+        return {
+            "name": name,
+            "slug": slug,
+            "ingredients": ing,
+            "duree_preparation_minutes": duree,
+        }
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        while True:
+            url = f"{MEALIE_URL}/api/recipes?orderDirection=desc&page={page}&perPage={per_page}&requireAllCategories=false&requireAllTags=false&requireAllTools=false&requireAllFoods=false"
+            r = requests.get(url, headers=headers, timeout=30)
+            if r.status_code != 200:
+                logger.warning("Failed to fetch Mealie page %s: %s", page, r.text)
+                break
+            payload = r.json()
+            items = payload.get("items") or []
+            if not items:
+                break
+            seen_in_page = set()
+            futures = []
+            for it in items:
+                name = str(it.get("name") or "").strip()
+                slug = str(it.get("slug") or "").strip()
+                if not name or not slug:
+                    continue
+                key = name.lower()
+                if key in dedup or key in seen_in_page:
+                    continue
+                seen_in_page.add(key)
+                futures.append(executor.submit(build_entry, name, slug, it.get("totalTime")))
+            for fut in as_completed(futures):
+                try:
+                    entry = fut.result()
+                except Exception:
+                    continue
+                if not entry:
+                    continue
+                key = str(entry.get("name") or "").strip().lower()
+                if key and key not in dedup:
+                    dedup[key] = entry
+            total_pages = payload.get("total_pages") or payload.get("totalPages") or page
+            if page >= total_pages:
+                break
+            page += 1
     entries = list(dedup.values())
     _save_mealie_buffer(entries)
     logger.info("Mealie buffer refreshed with %s recipes", len(entries))
@@ -901,3 +1251,25 @@ def _pop_mealie_recipe() -> Optional[Dict[str, Any]]:
     recipe = buf.pop(0)
     _save_mealie_buffer(buf)
     return recipe
+
+
+def _lookup_mealie_recipe(slug: str = "", name: str = "") -> Optional[Dict[str, Any]]:
+    def match(entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if slug:
+            for it in entries:
+                if str(it.get("slug") or "").strip() == slug:
+                    return it
+        if name:
+            target = name.strip().lower()
+            for it in entries:
+                if str(it.get("name") or "").strip().lower() == target:
+                    return it
+        return None
+
+    entries = _load_mealie_buffer()
+    found = match(entries)
+    if found:
+        return found
+    _refresh_mealie_buffer()
+    entries = _load_mealie_buffer()
+    return match(entries)

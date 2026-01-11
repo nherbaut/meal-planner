@@ -48,6 +48,41 @@
       </div>
     </div>
 
+    <div class="modal fade" id="regenModal" tabindex="-1" aria-labelledby="regenModalLabel" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="regenModalLabel">Nouvelle proposition (IA)</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-3">
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="regenMode" id="regenModeVeg" value="vegetarien" checked>
+                <label class="form-check-label" for="regenModeVeg">végétarien de saison</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="regenMode" id="regenModeGourmand" value="gourmand">
+                <label class="form-check-label" for="regenModeGourmand">gourmand</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="regenMode" id="regenModeInspire" value="inspire">
+                <label class="form-check-label" for="regenModeInspire">inspiré</label>
+              </div>
+            </div>
+            <div id="regenIngredientsWrap" class="mb-2" style="display:none;">
+              <label class="form-label small" for="regenIngredients">Ingrédients obligatoires (séparés par des virgules)</label>
+              <input type="text" class="form-control form-control-sm" id="regenIngredients" placeholder="ex: courge, lentilles, feta">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Annuler</button>
+            <button type="button" class="btn btn-primary btn-sm" id="regenConfirm">Proposer</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
       const monday = "{{ monday }}";
@@ -60,9 +95,134 @@
       let allIngredients = [];
       let planningData = [];
       let currentOpenIdx = null;
+      let mealieRecipes = [];
+      let mealieMatches = new Map();
+      let pendingRegenIdx = null;
+      let pendingRegenRow = null;
+
+      const MEALIE_MATCH_MAX_DISTANCE = 100;
+      const MEALIE_MATCH_MAX_RATIO = 0.05;
 
       function normalizeIngredient(s) {
         return (s || "").trim();
+      }
+
+      function normalizeText(s) {
+        return (s || "")
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim();
+      }
+
+      function damerauLevenshtein(a, b) {
+        const s = a || "";
+        const t = b || "";
+        const m = s.length;
+        const n = t.length;
+        if (!m) return n;
+        if (!n) return m;
+        const d = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+        for (let i = 0; i <= m; i++) d[i][0] = i;
+        for (let j = 0; j <= n; j++) d[0][j] = j;
+        for (let i = 1; i <= m; i++) {
+          for (let j = 1; j <= n; j++) {
+            const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+            let val = Math.min(
+              d[i - 1][j] + 1,
+              d[i][j - 1] + 1,
+              d[i - 1][j - 1] + cost
+            );
+            if (i > 1 && j > 1 && s[i - 1] === t[j - 2] && s[i - 2] === t[j - 1]) {
+              val = Math.min(val, d[i - 2][j - 2] + cost);
+            }
+            d[i][j] = val;
+          }
+        }
+        return d[m][n];
+      }
+
+      function getReceiptName(meal) {
+        if (!meal || typeof meal !== "object") return "";
+        const candidates = [
+          meal.recette,
+          meal.recette_name,
+          meal.receipt,
+          meal.receipt_name,
+          meal.recipe,
+          meal.recipe_name,
+        ];
+        for (const val of candidates) {
+          if (typeof val !== "string") continue;
+          const txt = val.trim();
+          if (txt) return txt;
+        }
+        const plats = Array.isArray(meal.plats) ? meal.plats : [];
+        if (typeof plats[0] === "string" && plats[0].trim()) {
+          return plats[0].trim();
+        }
+        return "";
+      }
+
+      function findMealieMatch(name) {
+        const target = normalizeText(name);
+        if (!target) return null;
+        let best = null;
+        for (const recipe of mealieRecipes) {
+          const candidateName = normalizeText(recipe && recipe.name ? recipe.name : "");
+          if (!candidateName) continue;
+          const dist = damerauLevenshtein(target, candidateName);
+          const maxLen = Math.max(target.length, candidateName.length);
+          const ratio = maxLen ? dist / maxLen : 1;
+          if (dist > MEALIE_MATCH_MAX_DISTANCE || ratio > MEALIE_MATCH_MAX_RATIO) continue;
+          if (!best || ratio < best.ratio || (ratio === best.ratio && dist < best.dist)) {
+            best = { recipe, dist, ratio };
+          }
+        }
+        return best;
+      }
+
+      function updateMealieMatchForIndex(idx) {
+        const meal = planningData[idx];
+        if (!meal) {
+          mealieMatches.delete(idx);
+          return;
+        }
+        const receiptName = getReceiptName(meal);
+        if (!receiptName) {
+          mealieMatches.delete(idx);
+          return;
+        }
+        const match = findMealieMatch(receiptName);
+        if (match) {
+          mealieMatches.set(idx, match);
+        } else {
+          mealieMatches.delete(idx);
+        }
+      }
+
+      function updateAllMealieMatches() {
+        mealieMatches = new Map();
+        planningData.forEach((_, idx) => updateMealieMatchForIndex(idx));
+      }
+
+      function getSelectedRegenMode() {
+        const selected = document.querySelector('input[name="regenMode"]:checked');
+        return selected ? selected.value : "vegetarien";
+      }
+
+      function openRegenModal(idx, rowEl) {
+        pendingRegenIdx = idx;
+        pendingRegenRow = rowEl || null;
+        const modalEl = document.getElementById("regenModal");
+        if (!modalEl) return;
+        const veg = document.getElementById("regenModeVeg");
+        if (veg) veg.checked = true;
+        if (regenIngredientsInput) regenIngredientsInput.value = "";
+        updateRegenIngredientsVisibility();
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        modal.show();
       }
 
       function computeAllIngredients(planning) {
@@ -157,23 +317,84 @@
           const btnNew = document.createElement("button");
           btnNew.className = "btn btn-outline-primary btn-sm position-relative";
           btnNew.type = "button";
-          btnNew.textContent = "Substituer le repas";
+          btnNew.textContent = "Nouvelle proposition";
           const badgeAI = document.createElement("span");
           badgeAI.className = "position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger";
           badgeAI.textContent = "IA";
           badgeAI.innerHTML += '<span class="visually-hidden">IA</span>';
           btnNew.appendChild(badgeAI);
-          btnNew.addEventListener("click", () => regenerateMeal(idx, card));
+          btnNew.addEventListener("click", () => openRegenModal(idx, card));
           topRow.appendChild(btnNew);
 
           const btnMealie = document.createElement("button");
           btnMealie.className = "btn btn-outline-success btn-sm";
           btnMealie.type = "button";
-          btnMealie.textContent = "Substituer avec Mealie";
-          btnMealie.addEventListener("click", () => regenerateMealMealie(idx, card));
+          btnMealie.textContent = "Ajouter un plat aléatoire de Mealie";
+          btnMealie.addEventListener("click", () => addRandomMealieDish(idx, card));
           topRow.appendChild(btnMealie);
 
-          
+          if (Array.isArray(mealieRecipes) && mealieRecipes.length) {
+            const dropdownWrap = document.createElement("div");
+            dropdownWrap.className = "dropdown";
+
+            const dropdownBtn = document.createElement("button");
+            dropdownBtn.className = "btn btn-outline-success btn-sm dropdown-toggle";
+            dropdownBtn.type = "button";
+            dropdownBtn.setAttribute("data-bs-toggle", "dropdown");
+            dropdownBtn.setAttribute("aria-expanded", "false");
+            dropdownBtn.textContent = "add with mealie";
+            dropdownWrap.appendChild(dropdownBtn);
+
+            const menu = document.createElement("div");
+            menu.className = "dropdown-menu p-2";
+            menu.style.maxHeight = "320px";
+            menu.style.overflowY = "auto";
+
+            const search = document.createElement("input");
+            search.type = "text";
+            search.className = "form-control form-control-sm mb-2";
+            search.placeholder = "Rechercher une recette";
+            menu.appendChild(search);
+
+            const list = document.createElement("div");
+            menu.appendChild(list);
+
+            function buildList(filter) {
+              list.innerHTML = "";
+              const needle = normalizeText(filter || "");
+              const items = mealieRecipes.filter((r) => {
+                const name = normalizeText(r && r.name ? r.name : "");
+                if (!name) return false;
+                return !needle || name.includes(needle);
+              });
+              if (!items.length) {
+                const empty = document.createElement("div");
+                empty.className = "text-muted small";
+                empty.textContent = "Aucun résultat";
+                list.appendChild(empty);
+                return;
+              }
+              items.forEach((r) => {
+                const itemBtn = document.createElement("button");
+                itemBtn.type = "button";
+                itemBtn.className = "dropdown-item";
+                itemBtn.textContent = r.name;
+                itemBtn.addEventListener("click", () => {
+                  const ok = confirm(`Ajouter la recette Mealie "${r.name}" à ce repas ?`);
+                  if (!ok) return;
+                  addMealieDish(idx, card, r);
+                });
+                list.appendChild(itemBtn);
+              });
+            }
+
+            buildList("");
+            search.addEventListener("input", (e) => buildList(e.target.value));
+            menu.addEventListener("click", (e) => e.stopPropagation());
+
+            dropdownWrap.appendChild(menu);
+            topRow.appendChild(dropdownWrap);
+          }
 
           inner.appendChild(topRow);
 
@@ -195,6 +416,10 @@
               } else {
                 items.forEach((it) => {
                   const row = document.createElement("div");
+                  if (isPlat) {
+                    row.className = "d-flex align-items-center justify-content-between";
+                  }
+                  const left = document.createElement("span");
                   if (isPlat && meal.mealie_slug) {
                     const a = document.createElement("a");
                     const base = "{{ mealie_url }}";
@@ -202,18 +427,28 @@
                     a.target = "_blank";
                     a.rel = "noopener noreferrer";
                     a.textContent = String(it);
-                    row.textContent = "• ";
-                    row.appendChild(a);
+                    left.textContent = "• ";
+                    left.appendChild(a);
                   } else if (isPlat) {
                     const a = document.createElement("a");
                     a.href = "https://www.google.com/search?q=" + encodeURIComponent(String(it));
                     a.target = "_blank";
                     a.rel = "noopener noreferrer";
                     a.textContent = String(it);
-                    row.textContent = "• ";
-                    row.appendChild(a);
+                    left.textContent = "• ";
+                    left.appendChild(a);
                   } else {
-                    row.textContent = "• " + String(it);
+                    left.textContent = "• " + String(it);
+                  }
+                  row.appendChild(left);
+                  if (isPlat) {
+                    const del = document.createElement("button");
+                    del.type = "button";
+                    del.className = "btn btn-link btn-sm text-danger p-0 ms-2";
+                    del.setAttribute("aria-label", `Supprimer ${String(it)}`);
+                    del.textContent = "×";
+                    del.addEventListener("click", () => removeDish(idx, String(it)));
+                    row.appendChild(del);
                   }
                   content.appendChild(row);
                 });
@@ -273,7 +508,7 @@
         if (createBtn) createBtn.style.display = "none";
       }
 
-      async function regenerateMeal(idx, rowEl) {
+      async function regenerateMeal(idx, rowEl, mode, ingredients) {
         err.style.display = "none";
         const meal = planningData[idx];
         if (!meal) return;
@@ -282,7 +517,7 @@
           const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/regenerate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jour: meal.jour, repas: meal.repas })
+            body: JSON.stringify({ jour: meal.jour, repas: meal.repas, mode: mode || "vegetarien", ingredients })
           });
           if (!r.ok) {
             let detail = r.status;
@@ -295,6 +530,7 @@
           const resp = await r.json();
           const newMeal = resp.meal || resp;
           planningData[idx] = newMeal;
+          updateMealieMatchForIndex(idx);
           renderPlanning(planningData, idx);
           computeAllIngredients(planningData);
         } catch (e) {
@@ -305,7 +541,7 @@
         }
       }
 
-      async function regenerateMealMealie(idx, rowEl) {
+      async function addRandomMealieDish(idx, rowEl) {
         err.style.display = "none";
         const meal = planningData[idx];
         if (!meal) return;
@@ -327,13 +563,89 @@
           const resp = await r.json();
           const newMeal = resp.meal || resp;
           planningData[idx] = newMeal;
-          renderPlanning(planningData);
+          updateMealieMatchForIndex(idx);
+          renderPlanning(planningData, idx);
           computeAllIngredients(planningData);
         } catch (e) {
           err.style.display = "block";
-          err.textContent = "Génération impossible: " + (e && e.message ? e.message : e);
+          err.textContent = "Ajout impossible: " + (e && e.message ? e.message : e);
         } finally {
           if (rowEl) rowEl.classList.remove("loading");
+        }
+      }
+
+      async function addMealieDish(idx, rowEl, recipe) {
+        err.style.display = "none";
+        const meal = planningData[idx];
+        if (!meal || !recipe || !recipe.slug) return;
+        if (rowEl) rowEl.classList.add("loading");
+        try {
+          const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/add-mealie-dish`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jour: meal.jour, repas: meal.repas, slug: recipe.slug, name: recipe.name })
+          });
+          if (!r.ok) {
+            let detail = r.status;
+            try {
+              const payload = await r.json();
+              if (payload && payload.detail) detail = payload.detail;
+            } catch (_) {}
+            throw new Error(detail);
+          }
+          const resp = await r.json();
+          const newMeal = resp.meal || resp;
+          planningData[idx] = newMeal;
+          updateMealieMatchForIndex(idx);
+          renderPlanning(planningData, idx);
+          computeAllIngredients(planningData);
+        } catch (e) {
+          err.style.display = "block";
+          err.textContent = "Ajout impossible: " + (e && e.message ? e.message : e);
+        } finally {
+          if (rowEl) rowEl.classList.remove("loading");
+        }
+      }
+
+      async function removeDish(idx, dish) {
+        err.style.display = "none";
+        const meal = planningData[idx];
+        if (!meal || !dish) return;
+        try {
+          const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}/remove-dish`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jour: meal.jour, repas: meal.repas, dish })
+          });
+          if (!r.ok) {
+            let detail = r.status;
+            try {
+              const payload = await r.json();
+              if (payload && payload.detail) detail = payload.detail;
+            } catch (_) {}
+            throw new Error(detail);
+          }
+          const resp = await r.json();
+          const newMeal = resp.meal || resp;
+          planningData[idx] = newMeal;
+          updateMealieMatchForIndex(idx);
+          renderPlanning(planningData, idx);
+          computeAllIngredients(planningData);
+        } catch (e) {
+          err.style.display = "block";
+          err.textContent = "Suppression impossible: " + (e && e.message ? e.message : e);
+        }
+      }
+
+      async function loadMealieRecipes() {
+        try {
+          const r = await fetch(`/mealie/recipes`, { headers: { "Accept": "application/json" } });
+          if (!r.ok) throw new Error("GET Mealie failed: " + r.status);
+          const data = await r.json();
+          if (!Array.isArray(data)) throw new Error("Invalid Mealie JSON");
+          mealieRecipes = data;
+        } catch (e) {
+          mealieRecipes = [];
         }
       }
 
@@ -346,6 +658,42 @@
         }
       });
 
+      const regenModalEl = document.getElementById("regenModal");
+      const regenIngredientsWrap = document.getElementById("regenIngredientsWrap");
+      const regenIngredientsInput = document.getElementById("regenIngredients");
+      const regenConfirmBtn = document.getElementById("regenConfirm");
+      const regenModeInputs = document.querySelectorAll('input[name="regenMode"]');
+
+      function updateRegenIngredientsVisibility() {
+        const mode = getSelectedRegenMode();
+        if (regenIngredientsWrap) {
+          regenIngredientsWrap.style.display = mode === "inspire" ? "block" : "none";
+        }
+        if (mode !== "inspire" && regenIngredientsInput) {
+          regenIngredientsInput.value = "";
+        }
+      }
+
+      regenModeInputs.forEach((input) => {
+        input.addEventListener("change", updateRegenIngredientsVisibility);
+      });
+      updateRegenIngredientsVisibility();
+
+      if (regenConfirmBtn) {
+        regenConfirmBtn.addEventListener("click", () => {
+          if (pendingRegenIdx === null) return;
+          const mode = getSelectedRegenMode();
+          const ingredients = mode === "inspire" && regenIngredientsInput ? regenIngredientsInput.value : "";
+          if (regenModalEl) {
+            const modal = bootstrap.Modal.getInstance(regenModalEl);
+            if (modal) modal.hide();
+          }
+          regenerateMeal(pendingRegenIdx, pendingRegenRow, mode, ingredients);
+          pendingRegenIdx = null;
+          pendingRegenRow = null;
+        });
+      }
+
       async function main() {
         try {
           const r = await fetch(`/meal-planning/${encodeURIComponent(monday)}`, {
@@ -354,6 +702,8 @@
           if (!r.ok) throw new Error("GET JSON failed: " + r.status);
           planningData = await r.json();
           if (!Array.isArray(planningData)) throw new Error("Invalid JSON: not an array");
+          await loadMealieRecipes();
+          updateAllMealieMatches();
           renderPlanning(planningData);
           computeAllIngredients(planningData);
           await loadSavedListIfAny();
