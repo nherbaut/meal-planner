@@ -8,7 +8,7 @@ import os
 import requests
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +55,10 @@ def _validate_date_str(monday: str) -> None:
         datetime.strptime(monday, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date value")
+
+
+def _week_monday(date_obj: date) -> date:
+    return date_obj - timedelta(days=date_obj.weekday())
 
 
 def _path_for(monday: str) -> Path:
@@ -736,6 +740,37 @@ def list_plannings(request: Request):
             "request": request,
             "dates": _list_available(),
         },
+    )
+
+
+@app.get("/meal-planning/tonight")
+def get_tonight_meal(request: Request):
+    today = datetime.now().date()
+    monday = _week_monday(today).strftime("%Y-%m-%d")
+    planning = _load_planning(monday)
+    day_names = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    day_name = day_names[today.weekday()]
+    meal = None
+    for m in planning:
+        if not isinstance(m, dict):
+            continue
+        if str(m.get("jour", "")).strip().lower() != day_name:
+            continue
+        if str(m.get("repas", "")).strip().lower() != "soir":
+            continue
+        meal = m
+        break
+    if not meal:
+        raise HTTPException(status_code=404, detail="No meal found for tonight")
+    planning_url = str(request.base_url).rstrip("/") + f"/meal-planning/{monday}"
+    return JSONResponse(
+        content={
+            "date": today.strftime("%Y-%m-%d"),
+            "jour": day_name,
+            "monday": monday,
+            "planning_url": planning_url,
+            "meal": meal,
+        }
     )
 
 
