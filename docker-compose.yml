@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   meal-planning:
-    build: .
+    image: nherbaut/meal-planning:latest
     ports:
       - "8000:8000"
     volumes:
