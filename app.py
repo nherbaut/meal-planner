@@ -777,6 +777,7 @@ def get_tonight_meal(request: Request):
 @app.get("/meal-planning/{monday}", response_class=HTMLResponse)
 def get_planning(request: Request, monday: str):
     _validate_date_str(monday)
+    _sync_mealie_week(monday)
     p = _path_for(monday)
     if not p.exists():
         # page upload
@@ -928,6 +929,8 @@ async def regenerate_meal(request: Request, monday: str):
     for i, m in enumerate(planning):
         if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
             old_meal = m
+            if m.get("mealie_plan_sync"):
+                new_meal["mealie_plan_sync"] = True
             planning[i] = new_meal
             replaced = True
             break
@@ -1128,6 +1131,8 @@ async def inject_mealie(request: Request, monday: str):
     for i, m in enumerate(planning):
         if str(m.get("jour", "")).strip().lower() == day and str(m.get("repas", "")).strip().lower() == repas:
             old_meal = m
+            if m.get("mealie_plan_sync"):
+                new_meal["mealie_plan_sync"] = True
             planning[i] = new_meal
             replaced = True
             break
@@ -1164,6 +1169,9 @@ def _parse_duration_minutes(raw: Optional[str]) -> Optional[int]:
     if not raw or not isinstance(raw, str):
         return None
     txt = raw.lower()
+    iso = re.fullmatch(r"p(?:(\d+)d)?(?:t(?:(\d+)h)?(?:(\d+)m)?)?", txt.strip())
+    if iso:
+        return sum(int(part or 0) * unit for part, unit in zip(iso.groups(), (1440, 60, 1))) or None
     total = 0
     m = re.findall(r"(\d+)\s*(heure|heures|h)", txt)
     for val, _ in m:
@@ -1308,3 +1316,156 @@ def _lookup_mealie_recipe(slug: str = "", name: str = "") -> Optional[Dict[str, 
     _refresh_mealie_buffer()
     entries = _load_mealie_buffer()
     return match(entries)
+
+
+MEALIE_MEAL_TYPES = {
+    "breakfast": "petit-dejeuner",
+    "lunch": "midi",
+    "dinner": "soir",
+    "side": "accompagnement",
+    "snack": "collation",
+    "drink": "boisson",
+    "dessert": "dessert",
+}
+
+
+def _fetch_mealie_plan(monday: str) -> Optional[List[Dict[str, Any]]]:
+    """Return None when Mealie is not configured, distinct from an empty plan."""
+    if not MEALIE_URL or not MEALIE_TOKEN:
+        return None
+    start = date.fromisoformat(monday)
+    end = start + timedelta(days=6)
+    entries: List[Dict[str, Any]] = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{MEALIE_URL}/api/households/mealplans",
+            headers={"Authorization": f"Bearer {MEALIE_TOKEN}", "accept": "application/json"},
+            params={"start_date": start.isoformat(), "end_date": end.isoformat(), "page": page, "perPage": 100},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise ValueError("Invalid Mealie meal plan response")
+        entries.extend(item for item in payload["items"] if isinstance(item, dict))
+        total_pages = payload.get("total_pages") or payload.get("totalPages") or page
+        if page >= int(total_pages):
+            return entries
+        page += 1
+
+
+def _mealie_planned_meals(monday: str, entries: List[Dict[str, Any]]) -> Dict[tuple[str, str], Dict[str, Any]]:
+    start = date.fromisoformat(monday)
+    cached = {str(r.get("slug") or ""): r for r in _load_mealie_buffer()}
+    grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for entry in entries:
+        recipe = entry.get("recipe")
+        if not isinstance(recipe, dict):
+            continue
+        try:
+            planned_date = date.fromisoformat(str(entry.get("date")))
+        except ValueError:
+            continue
+        if not start <= planned_date <= start + timedelta(days=6):
+            continue
+        entry_type = str(entry.get("entryType") or "").strip().lower()
+        if not entry_type:
+            continue
+        slug = str(recipe.get("slug") or "").strip()
+        name = str(recipe.get("name") or "").strip()
+        if not slug or not name:
+            continue
+        if slug not in cached:
+            try:
+                detail = _fetch_mealie_recipe_detail(slug) or {}
+            except requests.RequestException as error:
+                logger.warning("Failed to fetch Mealie recipe %s: %s", slug, error)
+                detail = {}
+            ingredients = []
+            for ingredient in detail.get("recipeIngredient") or []:
+                if isinstance(ingredient, dict):
+                    display = str(ingredient.get("display") or ingredient.get("note") or "").strip()
+                    if display:
+                        ingredients.append(display)
+            cached[slug] = {
+                "slug": slug,
+                "name": name,
+                "ingredients": ingredients,
+                "duree_preparation_minutes": _parse_duration_minutes(detail.get("totalTime") or recipe.get("totalTime")),
+            }
+        key = (["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"][planned_date.weekday()], MEALIE_MEAL_TYPES.get(entry_type, entry_type))
+        meal = grouped.setdefault(key, _normalize_meal(*key, {"plats": [], "ingredients": [], "restes": []}))
+        current_recipe = dict(cached[slug], name=name)
+        _append_mealie_dish(meal, current_recipe)
+        meal["restes"] = []
+        duration = current_recipe.get("duree_preparation_minutes")
+        if isinstance(duration, (int, float)):
+            meal["duree_preparation_minutes"] = max(meal.get("duree_preparation_minutes") or 0, int(duration))
+        meal["mealie_plan_sync"] = True
+    return grouped
+
+
+def _reconcile_shopping_list(monday: str, before: List[Dict[str, Any]], after: List[Dict[str, Any]]) -> None:
+    try:
+        payload = _load_shopping_list(monday)
+    except HTTPException as error:
+        if error.status_code == 404:
+            return
+        raise
+    def ingredients(plan: List[Dict[str, Any]]) -> Dict[str, str]:
+        result: Dict[str, str] = {}
+        for meal in plan:
+            for ingredient in _meal_ingredients(meal):
+                result.setdefault(ingredient.strip().lower(), ingredient)
+        return result
+    old = ingredients(before)
+    new = ingredients(after)
+    bought = payload["bought"]
+    bought_keys = {item.strip().lower() for item in bought}
+    to_buy = [item for item in payload["to_buy"] if item.strip().lower() not in (old.keys() - new.keys())]
+    existing = {item.strip().lower() for item in to_buy} | bought_keys
+    for key, ingredient in new.items():
+        if key not in old and key not in existing:
+            to_buy.append(ingredient)
+            existing.add(key)
+    notes = dict(payload["notes"])
+    for key in old.keys() - new.keys():
+        notes.pop(key, None)
+    for meal in after:
+        title = ", ".join(meal.get("plats") or [])
+        for ingredient in _meal_ingredients(meal):
+            notes[ingredient.strip().lower()] = title
+    _save_shopping_list(monday, to_buy, bought, notes)
+
+
+def _sync_mealie_week(monday: str) -> None:
+    try:
+        entries = _fetch_mealie_plan(monday)
+        if entries is None:
+            return
+        imported = _mealie_planned_meals(monday, entries)
+    except (requests.RequestException, ValueError, TypeError) as error:
+        logger.warning("Failed to import Mealie plan for %s: %s", monday, error)
+        return
+    try:
+        before = _load_planning(monday)
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+        before = []
+    if not before and not _path_for(monday).exists() and not imported:
+        return
+    dinner_days = {meal.get("jour") for meal in before if meal.get("repas") == "soir"}
+    needs_dinners = imported and len(dinner_days) < 7 and all(meal.get("mealie_plan_sync") for meal in before)
+    base = before
+    if needs_dinners:
+        try:
+            base = _generate_week(monday)
+        except Exception as error:
+            logger.warning("Could not fill unscheduled dinners for %s: %s", monday, error)
+    after = [meal for meal in base if not meal.get("mealie_plan_sync") and (meal.get("jour"), meal.get("repas")) not in imported]
+    after.extend(imported.values())
+    if after != before:
+        _save_planning(monday, after)
+        _reconcile_shopping_list(monday, before, after)

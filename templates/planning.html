@@ -266,13 +266,16 @@
       function renderPlanning(planning, keepOpenIndex = null) {
         acc.innerHTML = "";
         const order = new Map([["lundi", 1], ["mardi", 2], ["mercredi", 3], ["jeudi", 4], ["vendredi", 5], ["samedi", 6], ["dimanche", 7]]);
+        const mealOrder = new Map([["petit-dejeuner", 1], ["midi", 2], ["soir", 3], ["accompagnement", 4], ["collation", 5], ["boisson", 6], ["dessert", 7]]);
         const display = planning.map((m, idx) => ({ meal: m, idx }));
-        display.sort((a, b) => (order.get(a.meal.jour) || 999) - (order.get(b.meal.jour) || 999));
+        display.sort((a, b) =>
+          (order.get(a.meal.jour) || 999) - (order.get(b.meal.jour) || 999) ||
+          (mealOrder.get(a.meal.repas) || 999) - (mealOrder.get(b.meal.repas) || 999)
+        );
         const targetIdx = keepOpenIndex !== null ? keepOpenIndex : currentOpenIdx;
         if (keepOpenIndex !== null) currentOpenIdx = keepOpenIndex;
 
         display.forEach(({ meal, idx }, i) => {
-          if ((meal.repas || "").toLowerCase() !== "soir") return;
           const itemId = `acc-${i}`;
           const ingId = `ing-${i}`;
           const card = document.createElement("div");
@@ -288,7 +291,13 @@
           btn.setAttribute("data-bs-toggle", "collapse");
           btn.setAttribute("data-bs-target", `#${itemId}`);
           btn.addEventListener("click", () => { currentOpenIdx = idx; });
-          btn.innerHTML = `<div class="me-2 fw-semibold text-capitalize">${meal.jour || ""}</div><div class="small text-muted">${(Array.isArray(meal.plats) ? meal.plats.join(", ") : "")}</div>`;
+          const dayLabel = document.createElement("div");
+          dayLabel.className = "me-2 fw-semibold text-capitalize";
+          dayLabel.textContent = `${meal.jour || ""} · ${meal.repas || ""}`;
+          const dishesLabel = document.createElement("div");
+          dishesLabel.className = "small text-muted";
+          dishesLabel.textContent = Array.isArray(meal.plats) ? meal.plats.join(", ") : "";
+          btn.append(dayLabel, dishesLabel);
 
           header.appendChild(btn);
           card.appendChild(header);
@@ -420,10 +429,14 @@
                     row.className = "d-flex align-items-center justify-content-between";
                   }
                   const left = document.createElement("span");
-                  if (isPlat && meal.mealie_slug) {
+                  const linkedDish = isPlat && Array.isArray(meal.mealie_dishes)
+                    ? meal.mealie_dishes.find((dish) => dish && dish.name === it && dish.slug)
+                    : null;
+                  const mealieSlug = linkedDish ? linkedDish.slug : (meal.plats.length === 1 ? meal.mealie_slug : null);
+                  if (isPlat && mealieSlug) {
                     const a = document.createElement("a");
                     const base = "{{ mealie_url }}";
-                    a.href = `${base}/g/home/r/${encodeURIComponent(meal.mealie_slug)}`;
+                    a.href = `${base}/g/home/r/${encodeURIComponent(mealieSlug)}`;
                     a.target = "_blank";
                     a.rel = "noopener noreferrer";
                     a.textContent = String(it);
