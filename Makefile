@@ -1,4 +1,4 @@
-.PHONY: build build-all-arch run
+.PHONY: build build-all-arch push run
 
 IMAGE ?= nherbaut/meal-planning:latest
 ENV_FILE ?= .env
@@ -18,6 +18,9 @@ build:
 
 build-all-arch:
 	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 -t $(IMAGE) --push .
+
+push:
+	docker push $(IMAGE)
 
 run:
 	DOCKER_BUILDKIT=1 docker compose --env-file $(ENV_FILE) up -d --no-build
