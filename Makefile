@@ -23,4 +23,4 @@ push:
 	docker push $(IMAGE)
 
 run:
-	DOCKER_BUILDKIT=1 docker compose --env-file $(ENV_FILE) up -d --no-build
+	docker compose --env-file $(ENV_FILE) up -d --no-build --pull always

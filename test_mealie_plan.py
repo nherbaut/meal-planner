@@ -65,6 +65,16 @@ class MealieWeekSyncTests(unittest.TestCase):
         self.assertEqual(meal_planning._load_planning(MONDAY), [original[1]])
         self.assertEqual(meal_planning._load_shopping_list(MONDAY)["to_buy"], ["poire"])
 
+    def test_opening_ai_week_replaces_wednesday_dinner(self):
+        days = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+        meal_planning._save_planning(MONDAY, [meal(day, "soir", "AI dinner", "pomme") for day in days])
+        planned = [entry("2026-10-07", "dinner", "Mealie dinner", "mealie-dinner")]
+        with patch.object(meal_planning, "_fetch_mealie_plan", return_value=planned):
+            response = meal_planning.get_planning(self.json_request(), MONDAY)
+        week = json.loads(response.body)
+        self.assertEqual(len(week), 7)
+        self.assertEqual(next(item for item in week if item["jour"] == "mercredi")["plats"], ["Mealie dinner"])
+
     def test_new_week_uses_mealie_when_dinner_generation_fails(self):
         planned = [entry(MONDAY, "breakfast", "Mealie lunch", "mealie-lunch")]
         with patch.object(meal_planning, "_fetch_mealie_plan", return_value=planned), \
