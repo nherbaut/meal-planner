@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recettes Mealie · Season-score</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root { --ink:#223027; --line:#dae5d9; --green:#276749; }
+    body { color:var(--ink); background:#f5f7f3; }
+    .shell { max-width:1100px; }
+    .toolbar { border:1px solid var(--line); border-radius:18px; background:#fff; padding:1rem; }
+    .toolbar .form-control,.toolbar .form-select { min-height:48px; }
+    .recipe-card { border:1px solid var(--line); border-radius:18px; background:#fff; overflow:hidden; box-shadow:0 3px 14px rgba(28,53,35,.04); }
+    .recipe-card summary { display:flex; align-items:center; gap:.75rem; min-height:92px; padding:1rem; cursor:pointer; list-style:none; }
+    .recipe-card summary::-webkit-details-marker { display:none; }
+    .recipe-card summary:focus-visible { outline:3px solid var(--green); outline-offset:-3px; }
+    .recipe-card[open] summary { background:#eef5ef; }
+    .recipe-name { flex:1; min-width:0; font-weight:700; overflow-wrap:anywhere; }
+    .recipe-name small { display:block; color:#5d6b60; font-weight:400; font-size:.8rem; margin-top:.25rem; }
+    .grade-image { width:90px; height:auto; flex:none; }
+    .expand { font-size:1.5rem; color:var(--green); line-height:1; }
+    .recipe-card[open] .expand { transform:rotate(90deg); }
+    .recipe-detail { border-top:1px solid var(--line); padding:1rem; }
+    .ingredient-row { display:flex; justify-content:space-between; align-items:center; gap:.75rem; border-top:1px solid #e9eee7; padding:.65rem 0; }
+    .ingredient-row:first-child { border-top:0; }
+    .ingredient-name { min-width:0; overflow-wrap:anywhere; }
+    .ingredient-name small { display:block; color:#5d6b60; }
+    .score-chip { display:inline-block; min-width:108px; padding:.35rem .55rem; border-radius:10px; text-align:center; font-size:.82rem; font-weight:700; white-space:nowrap; }
+    .score-2 { background:#14532d; color:white; }
+    .score-1 { background:#77bd4a; color:#17351c; }
+    .score-0 { background:#a66d00; color:white; }
+    .score-other { background:#edf0ec; color:#526056; }
+    .legend { display:flex; flex-wrap:wrap; gap:.4rem; }
+    @media (min-width:768px) { .toolbar { display:grid; grid-template-columns:1fr 220px; gap:1rem; align-items:end; } }
+  </style>
+</head>
+<body>
+  <main class="container shell py-3 py-lg-4">
+    <header class="mb-4">
+      <a class="small text-decoration-none fw-semibold" href="/meal-planning/">← Toutes les semaines</a>
+      <div class="small text-uppercase fw-semibold text-success mt-4 mb-1">Catalogue Mealie</div>
+      <h1 class="h2 mb-2">Recettes et season-score</h1>
+      <p class="text-muted mb-0">Choisissez un mois pour voir la saisonnalité des recettes et de chaque ingrédient.</p>
+    </header>
+    <div class="toolbar mb-3">
+      <div><label class="form-label fw-semibold" for="search">Rechercher une recette</label><input id="search" class="form-control" type="search" placeholder="Nom de la recette" autocomplete="off"></div>
+      <div><label class="form-label fw-semibold" for="month">Mois du repas</label><select id="month" class="form-select">
+        <option value="1">Janvier</option><option value="2">Février</option><option value="3">Mars</option><option value="4">Avril</option>
+        <option value="5">Mai</option><option value="6">Juin</option><option value="7">Juillet</option><option value="8">Août</option>
+        <option value="9">Septembre</option><option value="10">Octobre</option><option value="11">Novembre</option><option value="12">Décembre</option>
+      </select></div>
+    </div>
+    <div class="legend mb-3" aria-label="Légende des scores d’ingrédients">
+      <span class="score-chip score-2">2 · pleine saison</span>
+      <span class="score-chip score-1">1 · disponible</span>
+      <span class="score-chip score-0">0 · hors saison</span>
+    </div>
+    <p id="count" class="text-muted small mb-3" role="status">Chargement des recettes…</p>
+    <div id="error" class="alert alert-danger d-none" role="alert"></div>
+    <div id="recipes" class="row g-3"></div>
+  </main>
+  <script>
+    const monthSelect=document.getElementById("month");
+    const search=document.getElementById("search");
+    const recipesEl=document.getElementById("recipes");
+    const countEl=document.getElementById("count");
+    const errorEl=document.getElementById("error");
+    monthSelect.value=String({{ month|tojson }});
+    let items=[];
+    let loadSequence=0;
+    function element(tag,className,value){const el=document.createElement(tag);if(className)el.className=className;if(value!==undefined)el.textContent=value;return el;}
+    async function getJson(url){const response=await fetch(url);if(!response.ok)throw new Error(`Erreur ${response.status}`);return response.json();}
+    function seasonSummary(item){const s=item.seasonality;if(s.relevant===0)return "Aucun ingrédient saisonnier à évaluer";if(s.score===null)return "Saison non évaluée";return `Season-score ${s.grade} · ${s.evaluated}/${s.relevant} ingrédients évalués`;}
+    function ingredientRow(ingredient){
+      const row=element("div","ingredient-row");
+      const name=element("div","ingredient-name",ingredient.display||ingredient.name||"Ingrédient sans nom");
+      if(ingredient.name&&ingredient.display&&ingredient.name.toLocaleLowerCase("fr")!==ingredient.display.toLocaleLowerCase("fr"))name.append(element("small","",`Associé à : ${ingredient.name}`));
+      let label="Non évalué",style="score-other";
+      if(ingredient.status==="neutral")label="Neutre";
+      else if(ingredient.status==="scored"){
+        label=["0 · hors saison","1 · disponible","2 · pleine saison"][ingredient.score];
+        style=`score-${ingredient.score}`;
+      }
+      row.append(name,element("span",`score-chip ${style}`,label));
+      return row;
+    }
+    function recipeCard(item){
+      const col=element("div","col-12 col-md-6");
+      const card=element("details","recipe-card h-100");
+      const summary=element("summary");
+      const title=element("span","recipe-name",item.name||"Recette sans nom");
+      title.append(element("small","",seasonSummary(item)));
+      summary.append(title);
+      const grade=item.seasonality.grade;
+      if(grade&&/^[ABCDE]$/.test(grade)){const image=element("img","grade-image");image.src=`/img/${grade}.png`;image.alt=`Season-score ${grade}`;image.width=90;image.height=47;summary.append(image);}
+      summary.append(element("span","expand","›"));
+      const detail=element("div","recipe-detail text-muted small","Chargement des ingrédients…");
+      card.append(summary,detail);
+      let loaded=false;
+      card.addEventListener("toggle",async()=>{
+        if(!card.open||loaded)return;
+        try{
+          const data=await getJson(`/mealie/catalog/recipes/${encodeURIComponent(item.slug)}?month=${encodeURIComponent(monthSelect.value)}`);
+          if(!card.isConnected)return;
+          detail.replaceChildren();
+          if(!data.ingredients.length)detail.append(element("p","mb-0","Aucun ingrédient renseigné dans Mealie."));
+          else data.ingredients.forEach(ingredient=>detail.append(ingredientRow(ingredient)));
+          loaded=true;
+        }catch(error){detail.textContent=`Impossible de charger les ingrédients : ${error.message}`;}
+      });
+      col.append(card);
+      col.dataset.search=(item.name||"").toLocaleLowerCase("fr");
+      return col;
+    }
+    function filter(){const query=search.value.trim().toLocaleLowerCase("fr");let visible=0;for(const card of recipesEl.children){card.hidden=!card.dataset.search.includes(query);if(!card.hidden)visible++;}countEl.textContent=`${visible} recette${visible>1?"s":""} sur ${items.length}`;}
+    async function loadCatalog(){
+      const sequence=++loadSequence;
+      recipesEl.replaceChildren();countEl.textContent="Chargement des recettes…";errorEl.classList.add("d-none");
+      try{
+        const data=await getJson(`/mealie/catalog/recipes?month=${encodeURIComponent(monthSelect.value)}`);
+        if(sequence!==loadSequence)return;
+        items=data.recipes;
+        const fragment=document.createDocumentFragment();items.forEach(item=>fragment.append(recipeCard(item)));recipesEl.append(fragment);filter();
+      }catch(error){if(sequence!==loadSequence)return;countEl.textContent="";errorEl.textContent=error.message;errorEl.classList.remove("d-none");}
+    }
+    search.addEventListener("input",filter);
+    monthSelect.addEventListener("change",()=>{history.replaceState(null,"",`/mealie/catalog?month=${encodeURIComponent(monthSelect.value)}`);loadCatalog();});
+    loadCatalog();
+  </script>
+</body>
+</html>

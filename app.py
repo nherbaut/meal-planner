@@ -852,6 +852,7 @@ def _draft_payload(monday: str, draft: Dict[str, Any]) -> Dict[str, Any]:
         month = (start + timedelta(days=offset)).month
         ranked = [{"slug": recipe.get("slug"), "name": recipe.get("name"),
                    "seasonality": seasonality.recipe_score(recipe, month, mapping)} for recipe in recipes]
+        ranked = [item for item in ranked if item["seasonality"]["grade"] in {"A", "B", "C"}]
         ranked.sort(key=lambda item: (item["seasonality"]["score"] is None,
                                       -(item["seasonality"]["score"] or 0),
                                       -item["seasonality"]["coverage"] if item["seasonality"]["coverage"] is not None else 0,
@@ -1316,6 +1317,60 @@ def list_mealie_recipes():
         _refresh_mealie_buffer()
         entries = _load_mealie_buffer()
     return JSONResponse(content=entries)
+
+
+def _catalog_month(month: Optional[int]) -> int:
+    value = month if month is not None else date.today().month
+    if not 1 <= value <= 12:
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
+    return value
+
+
+def _catalog_recipes() -> List[Dict[str, Any]]:
+    recipes = _load_mealie_buffer()
+    if not recipes:
+        _refresh_mealie_buffer()
+        recipes = _load_mealie_buffer()
+    return recipes
+
+
+@app.get("/mealie/catalog", response_class=HTMLResponse)
+def mealie_catalog(request: Request, month: Optional[int] = None):
+    selected_month = _catalog_month(month)
+    return templates.TemplateResponse(request, "mealie_catalog.html", {"month": selected_month})
+
+
+@app.get("/mealie/catalog/recipes")
+def mealie_catalog_recipes(month: Optional[int] = None):
+    selected_month = _catalog_month(month)
+    mapping = seasonality.load(SEASONALITY_FILE)
+    items = [
+        {"slug": recipe.get("slug"), "name": recipe.get("name"),
+         "seasonality": seasonality.recipe_score(recipe, selected_month, mapping)}
+        for recipe in _catalog_recipes()
+    ]
+    items.sort(key=lambda item: (
+        item["seasonality"]["score"] is None,
+        -(item["seasonality"]["score"] or 0),
+        str(item.get("name") or "").casefold(),
+    ))
+    return JSONResponse(content={"month": selected_month, "recipes": items})
+
+
+@app.get("/mealie/catalog/recipes/{slug}")
+def mealie_catalog_recipe(slug: str, month: Optional[int] = None):
+    selected_month = _catalog_month(month)
+    recipe = next((item for item in _catalog_recipes() if item.get("slug") == slug), None)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
+    mapping = seasonality.load(SEASONALITY_FILE)
+    return JSONResponse(content={
+        "slug": slug,
+        "name": recipe.get("name"),
+        "month": selected_month,
+        "seasonality": seasonality.recipe_score(recipe, selected_month, mapping),
+        "ingredients": seasonality.ingredient_scores(recipe, selected_month, mapping),
+    })
 
 
 @app.post("/meal-planning/{monday}/inject-mealie")

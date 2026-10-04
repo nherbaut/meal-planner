@@ -10,7 +10,7 @@
     body { color:var(--ink); background:#f5f7f3; padding-bottom:7rem; }
     .shell { max-width:1000px; }
     .step { font-size:.72rem; letter-spacing:.09em; text-transform:uppercase; font-weight:700; color:var(--green); }
-    .day-card { border:1px solid var(--line); border-radius:18px; background:#fff; box-shadow:0 3px 14px rgba(28,53,35,.04); }
+    .day-card { border:1px solid var(--line); border-radius:18px; background:#fff; box-shadow:0 3px 14px rgba(28,53,35,.04); touch-action:pan-y; }
     .day-card h2 { text-transform:capitalize; font-size:1.1rem; }
     .day-card .btn { min-height:44px; }
     .recipe-name { font-weight:650; overflow-wrap:anywhere; }
@@ -31,7 +31,7 @@
 <body>
 <div class="container shell py-3 py-md-4">
   <header class="mb-4">
-    <a class="small text-decoration-none fw-semibold" href="/meal-planning/">← Toutes les semaines</a>
+    <div class="d-flex flex-wrap gap-3"><a class="small text-decoration-none fw-semibold" href="/meal-planning/">← Toutes les semaines</a><a class="small text-decoration-none fw-semibold" href="/mealie/catalog">Catalogue Mealie</a></div>
     <p class="step mt-4 mb-1">Nouvelle semaine · 7 dîners</p>
     <h1 class="h2 mb-2" id="weekTitle">Semaine du {{ monday }}</h1>
     <p class="text-muted mb-0">Choisissez vos recettes Mealie, puis laissez l’IA compléter les soirs libres.</p>
@@ -63,7 +63,7 @@
 const monday = "{{ monday }}";
 const base = `/meal-planning/${encodeURIComponent(monday)}`;
 const names = ["lundi","mardi","mercredi","jeudi","vendredi","samedi","dimanche"];
-const state = {data:null, pickerDay:null, busy:false, ingredientScores:new Map()};
+const state = {data:null, pickerDay:null, busy:false, ingredientScores:new Map(), suggestionIndex:{}};
 const picker = new bootstrap.Modal(document.getElementById("picker"));
 const $ = id => document.getElementById(id);
 const start = new Date(`${monday}T12:00:00`), end = new Date(start); end.setDate(end.getDate()+6);
@@ -101,6 +101,12 @@ function ingredientDetail(day,item) {
   });
   return details;
 }
+function availableSuggestions(day) {
+  const used=new Set(Object.entries(state.data.choices).filter(([other])=>other!==day).map(([,meal])=>meal.mealie_slug).filter(Boolean));
+  for(const meal of state.data.locked)for(const dish of meal.mealie_dishes||[])if(dish.slug)used.add(dish.slug);
+  return (state.data.suggestions[day]||[]).filter(item=>!used.has(item.slug));
+}
+function nextSuggestion(day) {state.suggestionIndex[day]=(state.suggestionIndex[day]||0)+1;render();}
 function recipeLabel(meal) {return (meal?.plats||[]).join(" · ") || "Repas sans titre";}
 function render() {
   const data=state.data; if(!data)return;
@@ -120,8 +126,21 @@ function render() {
     if(choice?.mealie_slug) {const item=data.suggestions[day]?.find(r=>r.slug===choice.mealie_slug); if(item) card.append(seasonBadge(item),ingredientDetail(day,item));}
     if(data.conflicts.includes(day)) card.append(node("p","text-danger small", "Conflit : retirez votre ancien choix pour garder le repas du calendrier Mealie."));
     if(fixed) {if(data.conflicts.includes(day)) card.append(button("Retirer mon ancien choix","btn-outline-danger w-100",()=>choose(day,null))); container.append(col); return;}
-    const suggestion=data.suggestions[day]?.[0];
-    if(!selected && suggestion){card.append(node("div","small text-muted mb-1","Suggestion Mealie")); card.append(node("div","recipe-name",suggestion.name)); card.append(seasonBadge(suggestion),ingredientDetail(day,suggestion)); card.append(button("Ajouter cette recette","btn-outline-success w-100 mb-2",()=>choose(day,suggestion.slug)));}
+    const options=availableSuggestions(day);
+    const suggestion=options.length?options[(state.suggestionIndex[day]||0)%options.length]:null;
+    if(!selected && suggestion){
+      card.append(node("div","small text-muted mb-1","Suggestion Mealie · season-score C ou mieux"));
+      card.append(node("div","recipe-name",suggestion.name));
+      card.append(seasonBadge(suggestion),ingredientDetail(day,suggestion));
+      card.append(button("Ajouter cette recette","btn-outline-success w-100 mb-2",()=>choose(day,suggestion.slug)));
+      if(options.length>1){
+        card.append(button("← Autre recette","btn-outline-secondary w-100 mb-2",()=>nextSuggestion(day)));
+        card.append(node("div","text-muted small mb-2",`Glissez vers la gauche · ${(state.suggestionIndex[day]||0)%options.length+1}/${options.length}`));
+        let startX=null,startY=null;
+        card.addEventListener("touchstart",event=>{if(event.target.closest("button, details"))return;startX=event.touches[0].clientX;startY=event.touches[0].clientY;},{passive:true});
+        card.addEventListener("touchend",event=>{if(startX===null)return;const dx=event.changedTouches[0].clientX-startX,dy=event.changedTouches[0].clientY-startY;startX=null;if(dx<-50&&Math.abs(dx)>Math.abs(dy)*1.3)nextSuggestion(day);},{passive:true});
+      }
+    }
     if(!selected && !suggestion) card.append(node("p","text-muted small","Aucune recette Mealie disponible. L’IA pourra compléter ce dîner."));
     card.append(button(selected?"Changer de recette Mealie":"Voir les recettes Mealie","btn-outline-secondary w-100 mb-2",()=>openPicker(day)));
     if(choice||generated) card.append(button("Laisser ce soir à l’IA","btn-link text-secondary w-100",()=>choose(day,null)));
@@ -133,7 +152,7 @@ function render() {
 }
 async function choose(day,slug){try{state.data=await request("/draft/choice","POST",{day,slug});render();}catch(error){notice(error.message,true);}}
 function openPicker(day){state.pickerDay=day;$("search").value="";$("pickerTitle").textContent=`Recette Mealie · ${day}`;renderPicker();picker.show();}
-function renderPicker(){const list=$("pickerList");list.replaceChildren();const query=$("search").value.trim().toLocaleLowerCase("fr");const recipes=(state.data.suggestions[state.pickerDay]||[]).filter(r=>r.name.toLocaleLowerCase("fr").includes(query)).slice(0,60);recipes.forEach(r=>{const item=node("div","list-group-item picker-item");item.append(node("div","fw-semibold mb-1",r.name),seasonBadge(r),ingredientDetail(state.pickerDay,r),button("Choisir cette recette","btn-outline-success w-100",async()=>{picker.hide();await choose(state.pickerDay,r.slug);}));list.append(item);});if(!recipes.length)list.append(node("p","text-muted small","Aucune recette trouvée."));}
+function renderPicker(){const list=$("pickerList");list.replaceChildren();const query=$("search").value.trim().toLocaleLowerCase("fr");const recipes=availableSuggestions(state.pickerDay).filter(r=>r.name.toLocaleLowerCase("fr").includes(query)).slice(0,60);recipes.forEach(r=>{const item=node("div","list-group-item picker-item");item.append(node("div","fw-semibold mb-1",r.name),seasonBadge(r),ingredientDetail(state.pickerDay,r),button("Choisir cette recette","btn-outline-success w-100",async()=>{picker.hide();await choose(state.pickerDay,r.slug);}));list.append(item);});if(!recipes.length)list.append(node("p","text-muted small","Aucune recette avec un season-score C ou mieux trouvée."));}
 $("search").addEventListener("input",renderPicker);
 $("complete").addEventListener("click",async()=>{state.busy=true;render();$("complete").textContent="Génération en cours…";try{state.data=await request("/draft/complete","POST");render();notice("Propositions IA prêtes : relisez-les avant de valider.");}catch(error){notice(error.message,true);}finally{state.busy=false;$("complete").textContent="Compléter avec l’IA";render();}});
 $("confirm").addEventListener("click",async()=>{state.busy=true;render();try{await request("/draft/confirm","POST");location.href=base;}catch(error){notice(error.message,true);try{state.data=await request("/draft");}catch(_){}state.busy=false;render();}});

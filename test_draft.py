@@ -146,6 +146,26 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(detail["ingredients"][0]["score"], 2)
         self.assertEqual(detail["ingredients"][0]["status"], "scored")
 
+    def test_catalog_lists_all_recipes_and_monthly_ingredient_scores(self):
+        page = app_module.mealie_catalog(Request({"type": "http", "headers": []}), 10)
+        self.assertIn("Recettes et season-score", page.body.decode())
+        catalog = json.loads(app_module.mealie_catalog_recipes(10).body)
+        self.assertEqual(len(catalog["recipes"]), 3)
+        by_slug = {recipe["slug"]: recipe for recipe in catalog["recipes"]}
+        self.assertEqual(by_slug["soupe"]["seasonality"]["grade"], "A")
+        self.assertEqual(by_slug["salade"]["seasonality"]["grade"], "E")
+        ingredient = json.loads(app_module.mealie_catalog_recipe("salade", 10).body)["ingredients"][0]
+        self.assertEqual((ingredient["score"], ingredient["status"]), (0, "scored"))
+        with self.assertRaises(HTTPException) as error:
+            app_module.mealie_catalog_recipes(13)
+        self.assertEqual(error.exception.status_code, 400)
+
+    def test_weekly_suggestions_only_include_grade_c_or_better(self):
+        with patch.object(app_module, "_fetch_mealie_plan", return_value=[]):
+            draft = self.draft()
+        self.assertEqual([item["slug"] for item in draft["suggestions"]["lundi"]], ["soupe"])
+        self.assertTrue(all(item["seasonality"]["grade"] in ("A", "B", "C") for day in draft["suggestions"].values() for item in day))
+
     def test_legacy_calendar_only_week_can_be_confirmed(self):
         days = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
         old = [app_module._normalize_meal(day, "soir", {
