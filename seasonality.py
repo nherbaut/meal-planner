@@ -38,30 +38,54 @@ def save(path: Path, data: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def recipe_score(recipe: dict[str, Any], month: int, mapping: dict[str, Any]) -> dict[str, Any]:
+def score_grade(score: float | None) -> str | None:
+    if score is None:
+        return None
+    if score >= 0.9:
+        return "A"
+    if score >= 0.8:
+        return "B"
+    if score >= 0.7:
+        return "C"
+    if score >= 0.5:
+        return "D"
+    return "E"
+
+
+def ingredient_scores(recipe: dict[str, Any], month: int, mapping: dict[str, Any]) -> list[dict[str, Any]]:
     refs = recipe.get("ingredient_refs") or [{"display": x} for x in recipe.get("ingredients") or []]
-    points = 0
-    evaluated = 0
-    relevant = 0
+    result = []
     for ref in refs:
         if not isinstance(ref, dict):
             continue
+        display = str(ref.get("display") or "").strip()
         food_id = str(ref.get("food_id") or "")
+        neutral = False
         if not food_id:
-            line = mapping.get("lines", {}).get(line_key(str(ref.get("display") or "")), {})
-            if line.get("neutral") is True:
-                continue
+            line = mapping.get("lines", {}).get(line_key(display), {})
+            neutral = line.get("neutral") is True
             food_id = str(line.get("food_id") or "")
         food = mapping.get("foods", {}).get(food_id, {})
-        if food.get("neutral") is True:
-            continue
-        relevant += 1
+        neutral = neutral or food.get("neutral") is True
         value = food.get("months", {}).get(f"{month:02d}") if isinstance(food.get("months"), dict) else None
-        if type(value) is int and 0 <= value <= 2:
-            evaluated += 1
-            points += value
+        result.append({
+            "name": str(food.get("name") or ref.get("food_name") or display),
+            "display": display,
+            "score": value if not neutral and type(value) is int and 0 <= value <= 2 else None,
+            "status": "neutral" if neutral else "scored" if type(value) is int and 0 <= value <= 2 else "unknown",
+        })
+    return result
+
+
+def recipe_score(recipe: dict[str, Any], month: int, mapping: dict[str, Any]) -> dict[str, Any]:
+    ingredients = ingredient_scores(recipe, month, mapping)
+    relevant = sum(item["status"] != "neutral" for item in ingredients)
+    evaluated = sum(item["status"] == "scored" for item in ingredients)
+    points = sum(item["score"] for item in ingredients if item["status"] == "scored")
+    raw_score = points / (2 * relevant) if evaluated else None
     return {
-        "score": round(points / (2 * relevant), 3) if evaluated else None,
+        "score": round(raw_score, 3) if raw_score is not None else None,
+        "grade": score_grade(raw_score),
         "coverage": round(evaluated / relevant, 3) if relevant else None,
         "evaluated": evaluated,
         "relevant": relevant,

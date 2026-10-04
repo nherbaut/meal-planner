@@ -133,7 +133,18 @@ class DraftTests(unittest.TestCase):
         october = seasonality.recipe_score(recipe, 10, mapping)
         self.assertEqual(october["score"], 0.5)
         self.assertEqual(october["coverage"], 0.5)
+        self.assertEqual(october["grade"], "D")
         self.assertIsNone(seasonality.recipe_score(recipe, 9, mapping)["score"])
+
+    def test_grade_boundaries_and_ingredient_details(self):
+        for value, expected in ((1, "A"), (0.9, "A"), (0.899, "B"), (0.8, "B"),
+                                (0.799, "C"), (0.7, "C"), (0.699, "D"),
+                                (0.5, "D"), (0.499, "E"), (0, "E"), (None, None)):
+            self.assertEqual(seasonality.score_grade(value), expected)
+        detail = json.loads(app_module.get_recipe_seasonality(MONDAY, "soupe", "lundi").body)
+        self.assertEqual(detail["seasonality"]["grade"], "A")
+        self.assertEqual(detail["ingredients"][0]["score"], 2)
+        self.assertEqual(detail["ingredients"][0]["status"], "scored")
 
     def test_legacy_calendar_only_week_can_be_confirmed(self):
         days = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]

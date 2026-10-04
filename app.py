@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 TEMPLATES_DIR = APP_DIR / "templates"
+IMG_DIR = APP_DIR / "img"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 BUFFER_DIR = DATA_DIR / "buffers"
@@ -32,6 +33,7 @@ DRAFT_DIR = DATA_DIR / "drafts"
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 app = FastAPI(title="Meal Planning")
+app.mount("/img", StaticFiles(directory=str(IMG_DIR)), name="images")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 MEALIE_URL = os.getenv("MEALIE_URL", "").rstrip("/")
@@ -867,6 +869,24 @@ def _draft_payload(monday: str, draft: Dict[str, Any]) -> Dict[str, Any]:
 def get_week_draft(monday: str):
     _validate_date_str(monday)
     return JSONResponse(content=_draft_payload(monday, _refresh_draft(monday)))
+
+
+@app.get("/meal-planning/{monday}/draft/recipe-seasonality/{slug}")
+def get_recipe_seasonality(monday: str, slug: str, day: str):
+    _validate_date_str(monday)
+    if day not in WEEK_DAYS:
+        raise HTTPException(status_code=400, detail="Invalid day")
+    recipe = next((item for item in _load_mealie_buffer() if item.get("slug") == slug), None)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
+    planned_date = date.fromisoformat(monday) + timedelta(days=WEEK_DAYS.index(day))
+    mapping = seasonality.load(SEASONALITY_FILE)
+    return JSONResponse(content={
+        "slug": slug,
+        "date": planned_date.isoformat(),
+        "seasonality": seasonality.recipe_score(recipe, planned_date.month, mapping),
+        "ingredients": seasonality.ingredient_scores(recipe, planned_date.month, mapping),
+    })
 
 
 @app.post("/meal-planning/{monday}/draft/choice")

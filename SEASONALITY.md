@@ -26,3 +26,5 @@ Exemple :
 ```
 
 La sélection des recettes et leur classement utilisent ce fichier sans appel IA. Le bouton « Compléter avec l’IA » est le seul appel IA du parcours hebdomadaire.
+
+Dans le choix des recettes, le score global est représenté par les images `img/A.png` à `img/E.png` : A pour un score d'au moins 90 %, B d'au moins 80 %, C d'au moins 70 %, D d'au moins 50 %, E en dessous de 50 %. Les ingrédients non évalués comptent dans le dénominateur du score ; le nombre d'ingrédients évalués est indiqué à côté de l'image. Le détail affiche pour chaque ingrédient son score mensuel 0/2, 1/2 ou 2/2, ou son état neutre ou non évalué.
