@@ -66,7 +66,7 @@ function node(tag, cls, value) { const el=document.createElement(tag); if(cls) e
 function button(label, cls, action) {const el=node("button", `btn ${cls}`, label); el.type="button"; el.addEventListener("click",action); return el;}
 function notice(message, error=false) {const el=$("message"); el.textContent=message; el.className=`alert ${error?"alert-danger":"alert-success"}`; el.scrollIntoView({block:"nearest"});}
 async function request(path, method="GET", body) {const response=await fetch(base+path,{method,headers:body?{"Content-Type":"application/json"}:{},body:body?JSON.stringify(body):undefined}); if(!response.ok){let message=`Erreur ${response.status}`; try{message=(await response.json()).detail||message;}catch(_){} throw new Error(message);}return response.json();}
-function seasonalText(item) {const s=item?.seasonality; if(!s || s.score===null) return "Saison non évaluée"; return `Saison ${Math.round(s.score*100)} % · ${Math.round(s.coverage*100)} % évalués`;}
+function seasonalText(item) {const s=item?.seasonality; if(s?.relevant===0) return "Aucun ingrédient saisonnier à évaluer"; if(!s || s.score===null) return "Saison non évaluée"; return `Saison ${Math.round(s.score*100)} % · ${Math.round(s.coverage*100)} % évalués`;}
 function recipeLabel(meal) {return (meal?.plats||[]).join(" · ") || "Repas sans titre";}
 function render() {
   const data=state.data; if(!data)return;

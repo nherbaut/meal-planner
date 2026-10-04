@@ -75,7 +75,7 @@ def _ask_ai(items: list[dict[str, Any]], instruction: str) -> list[dict[str, Any
     response = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"), "messages": [
+        json={"model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"), "max_completion_tokens": 6000, "messages": [
             {"role": "system", "content": "Réponds uniquement par un tableau JSON valide. Aucun texte supplémentaire."},
             {"role": "user", "content": instruction + "\n" + json.dumps(items, ensure_ascii=False)},
         ]}, timeout=180,
@@ -87,7 +87,7 @@ def _ask_ai(items: list[dict[str, Any]], instruction: str) -> list[dict[str, Any
     return result
 
 
-def _batches(items: list[Any], size: int = 25):
+def _batches(items: list[Any], size: int = 12):
     for start in range(0, len(items), size):
         yield items[start:start + size]
 
@@ -111,23 +111,30 @@ def update_from_recipes(path: Path, recipes: list[dict[str, Any]]) -> tuple[int,
                 all_lines[line_key(display)] = display
     new_foods = [(food_id, name) for food_id, name in all_foods.items() if food_id not in data["foods"]]
     for batch in _batches(new_foods):
-        result = _ask_ai([{"id": key, "name": name} for key, name in batch],
-            "Pour chaque ingrédient, estime la saisonnalité du produit frais dans le Sud-Ouest de la France. "
-            "Rends exactement un objet par id: {id, neutral: bool, months: {01:0..2,...,12:0..2}}. "
-            "0=hors saison, 1=disponible localement, 2=pleine saison. "
-            "Pour sel, épices, conserves, produits secs, viande, etc., neutral=true et months={}. "
-            "Ne considère pas la disponibilité par importation comme une saison locale.")
-        by_id = {str(item.get("id")): item for item in result if isinstance(item, dict)}
-        for key, name in batch:
-            item = by_id.get(key)
-            if item is None or type(item.get("neutral")) is not bool:
-                raise ValueError(f"Missing seasonality for {name}")
-            neutral = item["neutral"]
-            months = item.get("months") or {}
-            if not neutral and (not isinstance(months, dict) or any(type(months.get(m)) is not int or months[m] not in (0, 1, 2) for m in MONTHS)):
-                raise ValueError(f"Invalid monthly scores for {name}")
-            data["foods"][key] = {"name": name, "neutral": neutral, "months": {} if neutral else {m: months[m] for m in MONTHS}}
-        save(path, data)
+        pending = dict(batch)
+        for _ in range(3):
+            if not pending:
+                break
+            result = _ask_ai([{"id": key, "name": name} for key, name in pending.items()],
+                "Pour chaque ingrédient, estime la saisonnalité du produit frais dans le Sud-Ouest de la France. "
+                "Rends exactement un objet par id: {id, neutral: bool, months: {01:0..2,...,12:0..2}}. "
+                "0=hors saison, 1=disponible localement, 2=pleine saison. "
+                "Pour sel, épices, conserves, produits secs, viande, etc., neutral=true et months={}. "
+                "Ne considère pas la disponibilité par importation comme une saison locale.")
+            by_id = {str(item.get("id")): item for item in result if isinstance(item, dict)}
+            for key, name in list(pending.items()):
+                item = by_id.get(key)
+                if item is None or type(item.get("neutral")) is not bool:
+                    continue
+                neutral = item["neutral"]
+                months = item.get("months") or {}
+                if not neutral and (not isinstance(months, dict) or any(type(months.get(m)) is not int or months[m] not in (0, 1, 2) for m in MONTHS)):
+                    continue
+                data["foods"][key] = {"name": name, "neutral": neutral, "months": {} if neutral else {m: months[m] for m in MONTHS}}
+                del pending[key]
+            save(path, data)
+        if pending:
+            raise ValueError(f"Missing seasonality for: {', '.join(pending.values())}")
     new_lines = [(key, display) for key, display in all_lines.items() if key not in data["lines"]]
     names = {key: value.get("name", "") for key, value in data["foods"].items()}
     for batch in _batches(new_lines):
@@ -137,23 +144,29 @@ def update_from_recipes(path: Path, recipes: list[dict[str, Any]]) -> tuple[int,
             candidates = difflib.get_close_matches(cleaned.casefold(), [n.casefold() for n in names.values()], n=10, cutoff=0.2)
             possible = [{"id": food_id, "name": name} for food_id, name in names.items() if name.casefold() in candidates]
             prompts.append({"key": key, "display": display, "candidates": possible})
-        result = _ask_ai(prompts,
-            "Pour chaque ligne de recette, identifie l'ingrédient principal parmi ses candidats. "
-            "Retourne exactement {key, food_id, neutral} par ligne. food_id doit être un id candidat ou null. "
-            "neutral=true uniquement si la saison n'a pas de sens (sel, épices, huile, produit sec, etc.). "
-            "Si aucun candidat ne convient à un produit saisonnier, food_id=null et neutral=false.")
-        by_key = {str(item.get("key")): item for item in result if isinstance(item, dict)}
-        for prompt in prompts:
-            key = prompt["key"]
-            item = by_key.get(key)
-            if item is None or type(item.get("neutral")) is not bool:
-                raise ValueError(f"Missing ingredient match for {key}")
-            allowed = {candidate["id"] for candidate in prompt["candidates"]}
-            food_id = item.get("food_id") or None
-            if food_id is not None and str(food_id) not in allowed:
-                raise ValueError(f"Invalid food id for {key}")
-            data["lines"][key] = {"display": prompt["display"], "food_id": str(food_id) if food_id else None, "neutral": item["neutral"]}
-        save(path, data)
+        pending = {prompt["key"]: prompt for prompt in prompts}
+        for _ in range(3):
+            if not pending:
+                break
+            result = _ask_ai(list(pending.values()),
+                "Pour chaque ligne de recette, identifie l'ingrédient principal parmi ses candidats. "
+                "Retourne exactement {key, food_id, neutral} par ligne. food_id doit être un id candidat ou null. "
+                "neutral=true uniquement si la saison n'a pas de sens (sel, épices, huile, produit sec, etc.). "
+                "Si aucun candidat ne convient à un produit saisonnier, food_id=null et neutral=false.")
+            by_key = {str(item.get("key")): item for item in result if isinstance(item, dict)}
+            for key, prompt in list(pending.items()):
+                item = by_key.get(key)
+                if item is None or type(item.get("neutral")) is not bool:
+                    continue
+                allowed = {candidate["id"] for candidate in prompt["candidates"]}
+                food_id = item.get("food_id") or None
+                if food_id is not None and str(food_id) not in allowed:
+                    continue
+                data["lines"][key] = {"display": prompt["display"], "food_id": str(food_id) if food_id else None, "neutral": item["neutral"]}
+                del pending[key]
+            save(path, data)
+        if pending:
+            raise ValueError(f"Missing ingredient matches for: {', '.join(pending)}")
     return len(new_foods), len(new_lines)
 
 

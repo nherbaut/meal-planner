@@ -113,6 +113,20 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(seasonality.load(path)["foods"]["id1"]["months"]["10"], 0)
         self.assertEqual(seasonality.line_key("200 g sel"), "sel")
 
+    def test_incomplete_ai_batch_retries_only_missing_ingredient(self):
+        path = app_module.SEASONALITY_FILE
+        recipes = [{"ingredient_refs": [
+            {"display": "courge", "food_id": "a", "food_name": "courge"},
+            {"display": "tomate", "food_id": "b", "food_name": "tomate"},
+        ]}]
+        first = [{"id": "a", "neutral": False, "months": {m: 2 for m in seasonality.MONTHS}}]
+        second = [{"id": "b", "neutral": False, "months": {m: 1 for m in seasonality.MONTHS}}]
+        with patch.object(seasonality, "_ask_ai", side_effect=[first, second]) as ask:
+            self.assertEqual(seasonality.update_from_recipes(path, recipes), (2, 0))
+        self.assertEqual([item["id"] for item in ask.call_args_list[1].args[0]], ["b"])
+        self.assertIn("a", seasonality.load(path)["foods"])
+        self.assertIn("b", seasonality.load(path)["foods"])
+
     def test_recipe_score_uses_meal_month_and_unknowns_reduce_coverage(self):
         recipe = {"ingredient_refs": [{"food_id": "courge"}, {"food_id": "missing"}]}
         mapping = seasonality.load(app_module.SEASONALITY_FILE)
