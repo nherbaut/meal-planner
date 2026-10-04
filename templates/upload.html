@@ -1,109 +1,108 @@
 <!doctype html>
 <html lang="fr">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Charger un planning - {{ monday }}</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
-    <style>
-      body { background: #f5f7f3; color: #223027; }
-      .page-shell { max-width: 760px; }
-      .choice-card { border: 1px solid #e1e8df; border-radius: 18px; box-shadow: 0 3px 14px rgba(28,53,35,.04); }
-      .primary-action { min-height: 52px; }
-      .advanced-toggle { cursor: pointer; min-height: 48px; display: flex; align-items: center; }
-      .advanced-actions .btn { min-height: 44px; }
-      @media (max-width: 575.98px) { .advanced-actions { display: grid !important; } }
-    </style>
-  </head>
-  <body>
-    <div class="container page-shell py-3 py-lg-4">
-      <header class="mb-4">
-        <a class="small text-decoration-none fw-semibold" href="/meal-planning/">← Toutes les semaines</a>
-        <div class="small text-uppercase fw-semibold text-success mt-4 mb-1">Nouvelle semaine</div>
-        <h1 class="h2 mb-1" id="weekTitle">Semaine du {{ monday }}</h1>
-        <p class="text-muted mb-0">Préparez un menu complet en un geste, puis ajustez les repas à votre goût.</p>
-      </header>
-
-      <div class="card choice-card mb-3">
-        <div class="card-body">
-          <div class="small text-uppercase fw-semibold text-success mb-2">Option recommandée</div>
-          <h2 class="h5">Générer les repas avec l’IA</h2>
-          <p class="text-muted small">Créez les repas de la semaine. Les recettes déjà programmées dans Mealie seront intégrées au planning.</p>
-          <button type="button" class="btn btn-success primary-action w-100 fw-semibold" id="generate">Générer la semaine</button>
-        </div>
-      </div>
-
-      <details class="card choice-card">
-        <summary class="card-body advanced-toggle fw-semibold">Options avancées · importer un planning JSON</summary>
-        <div class="card-body border-top pt-3">
-          <form id="f" method="post" action="/meal-planning/{{ monday }}">
-            <label class="form-label" for="t">JSON du planning</label>
-            <textarea class="form-control mb-3" id="t" name="planning_json" rows="10" placeholder='[{"jour":"lundi",...}]'></textarea>
-            <div class="d-flex gap-2 advanced-actions">
-              <button type="button" class="btn btn-outline-secondary" id="validate">Valider le JSON</button>
-              <button type="submit" class="btn btn-outline-success">Importer le planning</button>
-            </div>
-          </form>
-        </div>
-      </details>
-      <div class="small mt-3" id="msg" role="status" style="display:none;"></div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-      const t = document.getElementById("t");
-      const msg = document.getElementById("msg");
-      const genBtn = document.getElementById("generate");
-      const weekStart = new Date("{{ monday }}T12:00:00");
-      const weekEnd = new Date(weekStart);
-      weekEnd.setDate(weekStart.getDate() + 6);
-      const first = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: weekStart.getMonth() === weekEnd.getMonth() ? undefined : "long", year: weekStart.getFullYear() === weekEnd.getFullYear() ? undefined : "numeric" }).format(weekStart);
-      const last = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long", year: "numeric" }).format(weekEnd);
-      document.getElementById("weekTitle").textContent = `Semaine du ${first} au ${last}`;
-
-      function setMsg(text, isError) {
-        msg.style.display = "block";
-        msg.className = isError ? "text-danger small" : "text-success small";
-        msg.textContent = text;
-      }
-
-      document.getElementById("validate").addEventListener("click", () => {
-        msg.style.display = "none";
-        const raw = (t.value || "").trim();
-        if (!raw) return setMsg("JSON vide.", true);
-        try {
-          const obj = JSON.parse(raw);
-          if (!Array.isArray(obj)) return setMsg("Le JSON doit être un tableau.", true);
-          return setMsg("JSON valide.", false);
-        } catch (e) {
-          return setMsg("JSON invalide: " + e.message, true);
-        }
-      });
-
-      genBtn.addEventListener("click", async () => {
-        msg.style.display = "none";
-        genBtn.disabled = true;
-        genBtn.textContent = "Génération en cours…";
-        try {
-          const r = await fetch(`/meal-planning/${encodeURIComponent("{{ monday }}")}/generate-week`, {
-            method: "POST",
-          });
-          if (!r.ok) {
-            let detail = r.status;
-            try {
-              const payload = await r.json();
-              if (payload && payload.detail) detail = payload.detail;
-            } catch (_) {}
-            throw new Error(detail);
-          }
-          window.location.href = `/meal-planning/${encodeURIComponent("{{ monday }}")}`;
-        } catch (e) {
-          setMsg("Génération impossible: " + (e && e.message ? e.message : e), true);
-        } finally {
-          genBtn.disabled = false;
-          genBtn.textContent = "Générer la semaine";
-        }
-      });
-    </script>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Composer la semaine - {{ monday }}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root { --ink:#223027; --green:#276749; --line:#dae5d9; }
+    body { color:var(--ink); background:#f5f7f3; padding-bottom:7rem; }
+    .shell { max-width:1000px; }
+    .step { font-size:.72rem; letter-spacing:.09em; text-transform:uppercase; font-weight:700; color:var(--green); }
+    .day-card { border:1px solid var(--line); border-radius:18px; background:#fff; box-shadow:0 3px 14px rgba(28,53,35,.04); }
+    .day-card h2 { text-transform:capitalize; font-size:1.1rem; }
+    .day-card .btn { min-height:44px; }
+    .recipe-name { font-weight:650; overflow-wrap:anywhere; }
+    .score { color:#526558; font-size:.82rem; }
+    .sticky-actions { position:fixed; z-index:20; bottom:0; left:0; right:0; background:#fff; border-top:1px solid var(--line); padding:.7rem max(1rem, env(safe-area-inset-left)) calc(.7rem + env(safe-area-inset-bottom)); box-shadow:0 -6px 20px #1c352314; }
+    .sticky-actions .btn { min-height:48px; }
+    .picker-list { max-height:55vh; overflow:auto; }
+    .picker-item { min-height:58px; text-align:left; }
+    @media (min-width:768px) { body {padding-bottom:2rem;} .sticky-actions {position:static;box-shadow:none;border:0;background:transparent;padding:0;} }
+  </style>
+</head>
+<body>
+<div class="container shell py-3 py-md-4">
+  <header class="mb-4">
+    <a class="small text-decoration-none fw-semibold" href="/meal-planning/">← Toutes les semaines</a>
+    <p class="step mt-4 mb-1">Nouvelle semaine · 7 dîners</p>
+    <h1 class="h2 mb-2" id="weekTitle">Semaine du {{ monday }}</h1>
+    <p class="text-muted mb-0">Choisissez vos recettes Mealie, puis laissez l’IA compléter les soirs libres.</p>
+  </header>
+  <div id="message" class="alert d-none" role="status"></div>
+  <div id="calendarNote" class="alert alert-info d-none"></div>
+  <div id="days" class="row g-3 mb-4" aria-live="polite"></div>
+  <div class="sticky-actions d-flex flex-column flex-md-row gap-2 justify-content-md-end mb-md-4">
+    <button id="complete" type="button" class="btn btn-outline-success fw-semibold">Compléter avec l’IA</button>
+    <button id="confirm" type="button" class="btn btn-success fw-semibold">Valider la semaine</button>
+  </div>
+  <details class="card border-0 shadow-sm mt-4">
+    <summary class="card-body fw-semibold" style="cursor:pointer;min-height:48px">Option avancée · importer un planning JSON</summary>
+    <form class="card-body border-top" method="post" action="/meal-planning/{{ monday }}">
+      <label class="form-label" for="planningJson">JSON du planning</label>
+      <textarea class="form-control mb-3" id="planningJson" name="planning_json" rows="8" required></textarea>
+      <button class="btn btn-outline-success" type="submit">Importer</button>
+    </form>
+  </details>
+</div>
+<div class="modal fade" id="picker" tabindex="-1" aria-labelledby="pickerTitle" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-scrollable modal-fullscreen-sm-down"><div class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5" id="pickerTitle">Choisir une recette Mealie</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button></div>
+    <div class="modal-body"><input class="form-control mb-3" type="search" id="search" placeholder="Rechercher une recette" aria-label="Rechercher une recette"><div class="list-group picker-list" id="pickerList"></div></div>
+  </div></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const monday = "{{ monday }}";
+const base = `/meal-planning/${encodeURIComponent(monday)}`;
+const names = ["lundi","mardi","mercredi","jeudi","vendredi","samedi","dimanche"];
+const state = {data:null, pickerDay:null, busy:false};
+const picker = new bootstrap.Modal(document.getElementById("picker"));
+const $ = id => document.getElementById(id);
+const start = new Date(`${monday}T12:00:00`), end = new Date(start); end.setDate(end.getDate()+6);
+$("weekTitle").textContent = `Semaine du ${new Intl.DateTimeFormat("fr-FR",{day:"numeric",month:"long"}).format(start)} au ${new Intl.DateTimeFormat("fr-FR",{day:"numeric",month:"long",year:"numeric"}).format(end)}`;
+function node(tag, cls, value) { const el=document.createElement(tag); if(cls) el.className=cls; if(value!==undefined) el.textContent=value; return el; }
+function button(label, cls, action) {const el=node("button", `btn ${cls}`, label); el.type="button"; el.addEventListener("click",action); return el;}
+function notice(message, error=false) {const el=$("message"); el.textContent=message; el.className=`alert ${error?"alert-danger":"alert-success"}`; el.scrollIntoView({block:"nearest"});}
+async function request(path, method="GET", body) {const response=await fetch(base+path,{method,headers:body?{"Content-Type":"application/json"}:{},body:body?JSON.stringify(body):undefined}); if(!response.ok){let message=`Erreur ${response.status}`; try{message=(await response.json()).detail||message;}catch(_){} throw new Error(message);}return response.json();}
+function seasonalText(item) {const s=item?.seasonality; if(!s || s.score===null) return "Saison non évaluée"; return `Saison ${Math.round(s.score*100)} % · ${Math.round(s.coverage*100)} % évalués`;}
+function recipeLabel(meal) {return (meal?.plats||[]).join(" · ") || "Repas sans titre";}
+function render() {
+  const data=state.data; if(!data)return;
+  const locked=new Map(data.locked.filter(m=>m.repas==="soir").map(m=>[m.jour,m]));
+  const other=data.locked.filter(m=>m.repas!=="soir");
+  const note=$("calendarNote"); note.classList.toggle("d-none",other.length===0); note.textContent=other.length?`Autres repas du calendrier Mealie : ${other.map(m=>`${m.jour} ${m.repas} — ${recipeLabel(m)}`).join(" ; ")}`:"";
+  const container=$("days"); container.replaceChildren();
+  names.forEach((day,index)=>{
+    const col=node("div","col-12 col-md-6"); const card=node("section","day-card h-100 p-3"); col.append(card);
+    const date=new Date(start); date.setDate(date.getDate()+index);
+    card.append(node("h2","mb-2",`${day} ${new Intl.DateTimeFormat("fr-FR",{day:"numeric",month:"short"}).format(date)}`));
+    const fixed=locked.get(day), choice=data.choices[day], generated=data.generated[day], selected=fixed||choice||generated;
+    if(fixed) card.append(node("span","badge text-bg-success mb-2","🔒 Calendrier Mealie"));
+    else if(choice) card.append(node("span","badge text-bg-success mb-2","Recette Mealie choisie"));
+    else if(generated) card.append(node("span","badge text-bg-secondary mb-2","Proposition IA · à relire"));
+    if(selected) {card.append(node("div","recipe-name mb-2",recipeLabel(selected))); if(selected.ingredients?.length) card.append(node("p","text-muted small mb-2",selected.ingredients.join(", ")));}
+    if(data.conflicts.includes(day)) card.append(node("p","text-danger small", "Conflit : retirez votre ancien choix pour garder le repas du calendrier Mealie."));
+    if(fixed) {if(data.conflicts.includes(day)) card.append(button("Retirer mon ancien choix","btn-outline-danger w-100",()=>choose(day,null))); container.append(col); return;}
+    const suggestion=data.suggestions[day]?.[0];
+    if(!selected && suggestion){card.append(node("div","small text-muted mb-1","Suggestion Mealie")); card.append(node("div","recipe-name",suggestion.name)); card.append(node("div","score mb-2",seasonalText(suggestion))); card.append(button("Ajouter cette recette","btn-outline-success w-100 mb-2",()=>choose(day,suggestion.slug)));}
+    if(!selected && !suggestion) card.append(node("p","text-muted small","Aucune recette Mealie disponible. L’IA pourra compléter ce dîner."));
+    card.append(button(selected?"Changer de recette Mealie":"Voir les recettes Mealie","btn-outline-secondary w-100 mb-2",()=>openPicker(day)));
+    if(choice||generated) card.append(button("Laisser ce soir à l’IA","btn-link text-secondary w-100",()=>choose(day,null)));
+    container.append(col);
+  });
+  const available=names.some(day=>!locked.has(day)&&!data.choices[day]&&!data.generated[day]);
+  $("complete").disabled=state.busy||!available||data.conflicts.length>0;
+  $("confirm").disabled=state.busy||available||data.conflicts.length>0;
+}
+async function choose(day,slug){try{state.data=await request("/draft/choice","POST",{day,slug});render();}catch(error){notice(error.message,true);}}
+function openPicker(day){state.pickerDay=day;$("search").value="";$("pickerTitle").textContent=`Recette Mealie · ${day}`;renderPicker();picker.show();}
+function renderPicker(){const list=$("pickerList");list.replaceChildren();const query=$("search").value.trim().toLocaleLowerCase("fr");const recipes=(state.data.suggestions[state.pickerDay]||[]).filter(r=>r.name.toLocaleLowerCase("fr").includes(query)).slice(0,60);recipes.forEach(r=>{const item=button("","list-group-item list-group-item-action picker-item",async()=>{picker.hide();await choose(state.pickerDay,r.slug);});item.append(node("div","fw-semibold",r.name),node("div","score",seasonalText(r)));list.append(item);});if(!recipes.length)list.append(node("p","text-muted small","Aucune recette trouvée."));}
+$("search").addEventListener("input",renderPicker);
+$("complete").addEventListener("click",async()=>{state.busy=true;render();$("complete").textContent="Génération en cours…";try{state.data=await request("/draft/complete","POST");render();notice("Propositions IA prêtes : relisez-les avant de valider.");}catch(error){notice(error.message,true);}finally{state.busy=false;$("complete").textContent="Compléter avec l’IA";render();}});
+$("confirm").addEventListener("click",async()=>{state.busy=true;render();try{await request("/draft/confirm","POST");location.href=base;}catch(error){notice(error.message,true);try{state.data=await request("/draft");}catch(_){}state.busy=false;render();}});
+(async()=>{try{state.data=await request("/draft");render();}catch(error){notice(error.message,true);}})();
+</script>
+</body>
 </html>

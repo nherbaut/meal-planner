@@ -75,19 +75,14 @@ class MealieWeekSyncTests(unittest.TestCase):
         self.assertEqual(len(week), 7)
         self.assertEqual(next(item for item in week if item["jour"] == "mercredi")["plats"], ["Mealie dinner"])
 
-    def test_new_week_uses_mealie_when_dinner_generation_fails(self):
+    def test_new_week_does_not_generate_or_save_on_open(self):
         planned = [entry(MONDAY, "breakfast", "Mealie lunch", "mealie-lunch")]
         with patch.object(meal_planning, "_fetch_mealie_plan", return_value=planned), \
-             patch.object(meal_planning, "_generate_week", side_effect=RuntimeError("AI unavailable")):
+             patch.object(meal_planning, "_generate_week", side_effect=AssertionError("AI must not run")):
             response = meal_planning.get_planning(self.json_request(), MONDAY)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([(m["jour"], m["repas"]) for m in json.loads(response.body)], [("lundi", "petit-dejeuner")])
-        generated = [meal(day, "soir", "Generated dinner", "pomme") for day in
-                     ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]]
-        with patch.object(meal_planning, "_fetch_mealie_plan", return_value=planned), \
-             patch.object(meal_planning, "_generate_week", return_value=generated):
-            meal_planning._sync_mealie_week(MONDAY)
-        self.assertEqual(len(meal_planning._load_planning(MONDAY)), 8)
+        self.assertIn("Composer la semaine", response.body.decode())
+        self.assertFalse(meal_planning._path_for(MONDAY).exists())
 
     def test_iso_duration_is_parsed(self):
         self.assertEqual(meal_planning._parse_duration_minutes("PT1H30M"), 90)
@@ -118,7 +113,7 @@ class MealieWeekSyncTests(unittest.TestCase):
     def test_all_html_routes_render_with_request_first_signature(self):
         request = Request({"type": "http", "headers": []})
         with patch.object(meal_planning, "_fetch_mealie_plan", return_value=[]):
-            self.assertIn("Générer la semaine", meal_planning.get_planning(request, MONDAY).body.decode())
+            self.assertIn("Compléter avec l’IA", meal_planning.get_planning(request, MONDAY).body.decode())
             meal_planning._save_planning(MONDAY, [meal("lundi", "soir", "Local dinner", "pomme")])
             self.assertIn("Menu de la semaine", meal_planning.get_planning(request, MONDAY).body.decode())
         self.assertIn("Mes semaines", meal_planning.list_plannings(request).body.decode())

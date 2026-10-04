@@ -1,4 +1,4 @@
-.PHONY: build build-all-arch push run
+.PHONY: build build-all-arch push run seasonality
 
 IMAGE ?= nherbaut/meal-planning:latest
 ENV_FILE ?= .env
@@ -24,3 +24,8 @@ push:
 
 run:
 	docker compose --env-file $(ENV_FILE) up -d --no-build --pull always
+
+# Manual IA-1 pass; only new ingredients are submitted on later runs.
+seasonality:
+	docker compose --env-file $(ENV_FILE) build meal-planning
+	docker compose --env-file $(ENV_FILE) run --rm --no-deps meal-planning python seasonality.py

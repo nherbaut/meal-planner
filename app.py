@@ -7,6 +7,7 @@ import logging
 import os
 import requests
 import copy
+import seasonality
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, date
 from pathlib import Path
@@ -25,6 +26,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 BUFFER_DIR = DATA_DIR / "buffers"
 BUFFER_DIR.mkdir(parents=True, exist_ok=True)
 MEALIE_BUFFER_FILE = BUFFER_DIR / "mealie_buffer.json"
+SEASONALITY_FILE = DATA_DIR / "seasonality.json"
+DRAFT_DIR = DATA_DIR / "drafts"
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -774,13 +777,212 @@ def get_tonight_meal(request: Request):
     )
 
 
+WEEK_DAYS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
+
+
+def _draft_path(monday: str) -> Path:
+    return DATA_DIR / "drafts" / f"{monday}.json"
+
+
+def _confirmed_path(monday: str) -> Path:
+    return DATA_DIR / "confirmed" / monday
+
+
+def _load_draft(monday: str) -> Dict[str, Any]:
+    path = _draft_path(monday)
+    if not path.exists():
+        return {"choices": {}, "generated": {}, "locked": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("choices"), dict) and isinstance(data.get("generated"), dict):
+            return data
+    except (ValueError, OSError):
+        pass
+    raise HTTPException(status_code=500, detail="Stored draft is corrupted")
+
+
+def _sync_only_planning(monday: str) -> bool:
+    if not _path_for(monday).exists() or _confirmed_path(monday).exists():
+        return False
+    planning = _load_planning(monday)
+    return bool(planning) and all(isinstance(meal, dict) and meal.get("mealie_plan_sync") for meal in planning)
+
+
+def _save_draft(monday: str, draft: Dict[str, Any]) -> None:
+    path = _draft_path(monday)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(draft, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _refresh_draft(monday: str) -> Dict[str, Any]:
+    if _path_for(monday).exists() and not _sync_only_planning(monday):
+        raise HTTPException(status_code=409, detail="La semaine est déjà validée")
+    draft = _load_draft(monday)
+    if _sync_only_planning(monday) and not draft.get("locked"):
+        draft["locked"] = _load_planning(monday)
+    try:
+        entries = _fetch_mealie_plan(monday)
+        if entries is not None:
+            locked = list(_mealie_planned_meals(monday, entries).values())
+            if locked != draft.get("locked"):
+                draft["locked"] = locked
+                _save_draft(monday, draft)
+    except (requests.RequestException, ValueError, TypeError) as error:
+        logger.warning("Failed to refresh draft calendar for %s: %s", monday, error)
+    return draft
+
+
+def _draft_conflicts(draft: Dict[str, Any]) -> List[str]:
+    locked_days = {meal.get("jour") for meal in draft.get("locked", []) if meal.get("repas") == "soir"}
+    return [day for day in WEEK_DAYS if day in locked_days and (day in draft["choices"] or day in draft["generated"])]
+
+
+def _draft_payload(monday: str, draft: Dict[str, Any]) -> Dict[str, Any]:
+    mapping = seasonality.load(SEASONALITY_FILE)
+    recipes = _load_mealie_buffer()
+    start = date.fromisoformat(monday)
+    suggestions: Dict[str, List[Dict[str, Any]]] = {}
+    used_slugs = {str(meal.get("mealie_slug")) for meal in draft["choices"].values() if meal.get("mealie_slug")}
+    used_slugs.update(str(dish.get("slug")) for meal in draft.get("locked", []) for dish in meal.get("mealie_dishes", []) if isinstance(dish, dict) and dish.get("slug"))
+    for offset, day in enumerate(WEEK_DAYS):
+        month = (start + timedelta(days=offset)).month
+        ranked = [{"slug": recipe.get("slug"), "name": recipe.get("name"),
+                   "seasonality": seasonality.recipe_score(recipe, month, mapping)} for recipe in recipes]
+        ranked.sort(key=lambda item: (item["seasonality"]["score"] is None,
+                                      -(item["seasonality"]["score"] or 0),
+                                      -item["seasonality"]["coverage"] if item["seasonality"]["coverage"] is not None else 0,
+                                      str(item.get("name") or "").casefold()))
+        first_unused = next((item for item in ranked if item.get("slug") not in used_slugs), None)
+        if first_unused is not None:
+            ranked.remove(first_unused)
+            ranked.insert(0, first_unused)
+            used_slugs.add(str(first_unused.get("slug")))
+        suggestions[day] = ranked
+    return {"monday": monday, **draft, "conflicts": _draft_conflicts(draft), "suggestions": suggestions}
+
+
+@app.get("/meal-planning/{monday}/draft")
+def get_week_draft(monday: str):
+    _validate_date_str(monday)
+    return JSONResponse(content=_draft_payload(monday, _refresh_draft(monday)))
+
+
+@app.post("/meal-planning/{monday}/draft/choice")
+async def choose_draft_recipe(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from error
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+    day = str(body.get("day") or "").lower()
+    if day not in WEEK_DAYS:
+        raise HTTPException(status_code=400, detail="Invalid day")
+    draft = _refresh_draft(monday)
+    slug = str(body.get("slug") or "").strip()
+    if slug:
+        if any(meal.get("jour") == day and meal.get("repas") == "soir" for meal in draft.get("locked", [])):
+            raise HTTPException(status_code=409, detail="Repas Mealie verrouillé")
+        recipe = next((r for r in _load_mealie_buffer() if r.get("slug") == slug), None)
+        if recipe is None:
+            raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
+        draft["choices"][day] = _mealie_recipe_to_meal(recipe, day, "soir")
+    else:
+        draft["choices"].pop(day, None)
+    draft["generated"].pop(day, None)
+    _save_draft(monday, draft)
+    return JSONResponse(content=_draft_payload(monday, draft))
+
+
+def _seasonal_prompt_summary(monday: str, mapping: Dict[str, Any]) -> str:
+    months = {(date.fromisoformat(monday) + timedelta(days=i)).month for i in range(7)}
+    peak = []
+    avoid = []
+    for food in mapping.get("foods", {}).values():
+        if food.get("neutral") or not food.get("name"):
+            continue
+        values = [food.get("months", {}).get(f"{month:02d}") for month in months]
+        if values and all(value == 2 for value in values):
+            peak.append(food["name"])
+        elif values and all(value == 0 for value in values):
+            avoid.append(food["name"])
+    return f"Pleine saison: {', '.join(sorted(set(peak))[:30])}. Hors saison: {', '.join(sorted(set(avoid))[:30])}."
+
+
+@app.post("/meal-planning/{monday}/draft/complete")
+def complete_week_draft(monday: str):
+    _validate_date_str(monday)
+    draft = _refresh_draft(monday)
+    if _draft_conflicts(draft):
+        raise HTTPException(status_code=409, detail="Résolvez les conflits avec le calendrier Mealie")
+    locked_days = {meal["jour"] for meal in draft.get("locked", []) if meal.get("repas") == "soir"}
+    missing = [day for day in WEEK_DAYS if day not in locked_days and day not in draft["choices"] and day not in draft["generated"]]
+    if not missing:
+        return JSONResponse(content=_draft_payload(monday, draft))
+    selected = [meal.get("plats") for meal in draft.get("locked", []) if meal.get("repas") == "soir"]
+    selected += [meal.get("plats") for meal in draft["choices"].values()]
+    prompt = (
+        f"Compose exactement les dîners manquants pour la semaine du {monday}, Sud-Ouest de la France, "
+        "pour 2 adultes et 2 enfants. Recettes familiales, peu transformées, moins de 45 minutes, variées. "
+        f"Jours à remplir: {', '.join(missing)}. Repas déjà choisis à ne pas répéter: {json.dumps(selected, ensure_ascii=False)}. "
+        f"{_seasonal_prompt_summary(monday, seasonality.load(SEASONALITY_FILE))} "
+        "Réponds uniquement par un tableau JSON avec exactement un objet par jour manquant. "
+        "Chaque objet contient jour, repas='soir', plats (liste), ingredients (liste), "
+        "duree_preparation_minutes (nombre), restes (liste)."
+    )
+    try:
+        generated = _extract_json_from_text(_call_openai(prompt))
+    except (ValueError, KeyError) as error:
+        raise HTTPException(status_code=502, detail=f"Réponse IA invalide: {error}") from error
+    if not isinstance(generated, list) or len(generated) != len(missing):
+        raise HTTPException(status_code=502, detail="L’IA n’a pas fourni tous les dîners demandés")
+    by_day: Dict[str, Dict[str, Any]] = {}
+    for meal in generated:
+        if not isinstance(meal, dict) or meal.get("jour") not in missing or meal.get("jour") in by_day or not isinstance(meal.get("plats"), list) or not meal["plats"] or not isinstance(meal.get("ingredients"), list):
+            raise HTTPException(status_code=502, detail="La réponse IA contient un dîner invalide")
+        by_day[meal["jour"]] = _normalize_meal(meal["jour"], "soir", meal)
+    if set(by_day) != set(missing):
+        raise HTTPException(status_code=502, detail="La réponse IA omet un dîner")
+    draft["generated"].update(by_day)
+    _save_draft(monday, draft)
+    return JSONResponse(content=_draft_payload(monday, draft))
+
+
+@app.post("/meal-planning/{monday}/draft/confirm")
+def confirm_week_draft(monday: str):
+    _validate_date_str(monday)
+    draft = _refresh_draft(monday)
+    if _draft_conflicts(draft):
+        raise HTTPException(status_code=409, detail="Résolvez les conflits avec le calendrier Mealie")
+    locked = draft.get("locked", [])
+    locked_days = {meal["jour"] for meal in locked if meal.get("repas") == "soir"}
+    missing = [day for day in WEEK_DAYS if day not in locked_days and day not in draft["choices"] and day not in draft["generated"]]
+    if missing:
+        raise HTTPException(status_code=409, detail=f"Dîners manquants: {', '.join(missing)}")
+    planning = locked + [draft["choices"].get(day) or draft["generated"][day] for day in WEEK_DAYS if day not in locked_days]
+    _save_planning(monday, planning)
+    ingredients = _dedupe_strings([item for meal in planning for item in _meal_ingredients(meal)])
+    notes = {item.casefold(): ", ".join(meal.get("plats") or []) for meal in planning for item in _meal_ingredients(meal)}
+    _save_shopping_list(monday, ingredients, notes=notes)
+    _confirmed_path(monday).parent.mkdir(parents=True, exist_ok=True)
+    _confirmed_path(monday).touch()
+    _draft_path(monday).unlink(missing_ok=True)
+    return JSONResponse(status_code=201, content={"monday": monday, "planning": planning})
+
+
 @app.get("/meal-planning/{monday}", response_class=HTMLResponse)
 def get_planning(request: Request, monday: str):
     _validate_date_str(monday)
-    _sync_mealie_week(monday)
     p = _path_for(monday)
-    if not p.exists():
-        # page upload
+    if p.exists() and not _sync_only_planning(monday):
+        _sync_mealie_week(monday)
+    if not p.exists() or _sync_only_planning(monday):
+        if p.exists() and _wants_json(request):
+            return JSONResponse(content=_load_planning(monday))
+        # The draft is created by its API so opening the page is read-only.
         return templates.TemplateResponse(
             request,
             "upload.html",
@@ -834,6 +1036,8 @@ async def post_planning(request: Request, monday: str):
             raise HTTPException(status_code=400, detail=f"Invalid JSON: {e.msg}")
 
     _save_planning(monday, planning)
+    _confirmed_path(monday).parent.mkdir(parents=True, exist_ok=True)
+    _confirmed_path(monday).touch()
     return RedirectResponse(url=f"/meal-planning/{monday}", status_code=303)
 
 
@@ -1082,9 +1286,7 @@ async def remove_dish(request: Request, monday: str):
 @app.post("/meal-planning/{monday}/generate-week")
 def generate_week(monday: str):
     _validate_date_str(monday)
-    planning = _generate_week(monday)
-    _save_planning(monday, planning)
-    return JSONResponse(status_code=201, content={"monday": monday, "planning": planning})
+    return complete_week_draft(monday)
 
 
 @app.get("/mealie/recipes")
@@ -1229,16 +1431,22 @@ def _refresh_mealie_buffer() -> None:
     def build_entry(name: str, slug: str, total_time: Optional[str]) -> Optional[Dict[str, Any]]:
         detail = _fetch_mealie_recipe_detail(slug) or {}
         ing = []
+        ingredient_refs = []
         for rec in detail.get("recipeIngredient") or []:
+            if not isinstance(rec, dict):
+                continue
             note = rec.get("display") or rec.get("note") or ""
             note = str(note).strip()
             if note:
                 ing.append(note)
+                food = rec.get("food") if isinstance(rec.get("food"), dict) else {}
+                ingredient_refs.append({"display": note, "food_id": str(food.get("id") or ""), "food_name": str(food.get("name") or "")})
         duree = _parse_duration_minutes(detail.get("totalTime") or total_time)
         return {
             "name": name,
             "slug": slug,
             "ingredients": ing,
+            "ingredient_refs": ingredient_refs,
             "duree_preparation_minutes": duree,
         }
 
@@ -1383,15 +1591,19 @@ def _mealie_planned_meals(monday: str, entries: List[Dict[str, Any]]) -> Dict[tu
                 logger.warning("Failed to fetch Mealie recipe %s: %s", slug, error)
                 detail = {}
             ingredients = []
+            ingredient_refs = []
             for ingredient in detail.get("recipeIngredient") or []:
                 if isinstance(ingredient, dict):
                     display = str(ingredient.get("display") or ingredient.get("note") or "").strip()
                     if display:
                         ingredients.append(display)
+                        food = ingredient.get("food") if isinstance(ingredient.get("food"), dict) else {}
+                        ingredient_refs.append({"display": display, "food_id": str(food.get("id") or ""), "food_name": str(food.get("name") or "")})
             cached[slug] = {
                 "slug": slug,
                 "name": name,
                 "ingredients": ingredients,
+                "ingredient_refs": ingredient_refs,
                 "duree_preparation_minutes": _parse_duration_minutes(detail.get("totalTime") or recipe.get("totalTime")),
             }
         key = (["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"][planned_date.weekday()], MEALIE_MEAL_TYPES.get(entry_type, entry_type))
@@ -1440,6 +1652,8 @@ def _reconcile_shopping_list(monday: str, before: List[Dict[str, Any]], after: L
 
 
 def _sync_mealie_week(monday: str) -> None:
+    if not _path_for(monday).exists():
+        return
     try:
         entries = _fetch_mealie_plan(monday)
         if entries is None:
@@ -1456,15 +1670,7 @@ def _sync_mealie_week(monday: str) -> None:
         before = []
     if not before and not _path_for(monday).exists() and not imported:
         return
-    dinner_days = {meal.get("jour") for meal in before if meal.get("repas") == "soir"}
-    needs_dinners = imported and len(dinner_days) < 7 and all(meal.get("mealie_plan_sync") for meal in before)
-    base = before
-    if needs_dinners:
-        try:
-            base = _generate_week(monday)
-        except Exception as error:
-            logger.warning("Could not fill unscheduled dinners for %s: %s", monday, error)
-    after = [meal for meal in base if not meal.get("mealie_plan_sync") and (meal.get("jour"), meal.get("repas")) not in imported]
+    after = [meal for meal in before if not meal.get("mealie_plan_sync") and (meal.get("jour"), meal.get("repas")) not in imported]
     after.extend(imported.values())
     if after != before:
         _save_planning(monday, after)
