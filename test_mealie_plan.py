@@ -115,6 +115,16 @@ class MealieWeekSyncTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body), original)
 
+    def test_all_html_routes_render_with_request_first_signature(self):
+        request = Request({"type": "http", "headers": []})
+        with patch.object(meal_planning, "_fetch_mealie_plan", return_value=[]):
+            self.assertIn("Charger un planning", meal_planning.get_planning(request, MONDAY).body.decode())
+            meal_planning._save_planning(MONDAY, [meal("lundi", "soir", "Local dinner", "pomme")])
+            self.assertIn("Planning semaine", meal_planning.get_planning(request, MONDAY).body.decode())
+        self.assertIn("meal-planning", meal_planning.list_plannings(request).body.decode())
+        meal_planning._save_shopping_list(MONDAY, ["pomme"])
+        self.assertIn("pomme", meal_planning.shopping_list(request, MONDAY).body.decode())
+
     @staticmethod
     def json_request():
         return Request({"type": "http", "headers": [(b"accept", b"application/json")]})

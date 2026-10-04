@@ -735,9 +735,9 @@ def _generate_meal_pool(monday: str, planning: List[Dict[str, Any]]) -> List[Dic
 @app.get("/meal-planning/", response_class=HTMLResponse)
 def list_plannings(request: Request):
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "dates": _list_available(),
         },
     )
@@ -782,9 +782,9 @@ def get_planning(request: Request, monday: str):
     if not p.exists():
         # page upload
         return templates.TemplateResponse(
+            request,
             "upload.html",
             {
-                "request": request,
                 "monday": monday,
                 "mealie_url": MEALIE_URL,
             },
@@ -796,9 +796,9 @@ def get_planning(request: Request, monday: str):
 
     # page planning (HTML) + JS qui refait un GET Accept: application/json
     return templates.TemplateResponse(
+        request,
         "planning.html",
         {
-            "request": request,
             "monday": monday,
             "mealie_url": MEALIE_URL,
         },
@@ -890,9 +890,9 @@ def shopping_list(request: Request, monday: str):
         return JSONResponse(content={"monday": monday, **payload, "planning": planning})
 
     return templates.TemplateResponse(
+        request,
         "shopping_list.html",
         {
-            "request": request,
             "to_buy": payload["to_buy"],
             "bought": payload["bought"],
             "notes": payload.get("notes", {}),
