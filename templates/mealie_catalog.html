@@ -12,13 +12,13 @@
     .toolbar { border:1px solid var(--line); border-radius:18px; background:#fff; padding:1rem; }
     .toolbar .form-control,.toolbar .form-select { min-height:48px; }
     .recipe-card { border:1px solid var(--line); border-radius:18px; background:#fff; overflow:hidden; box-shadow:0 3px 14px rgba(28,53,35,.04); }
-    .recipe-card summary { display:flex; align-items:center; gap:.75rem; min-height:92px; padding:1rem; cursor:pointer; list-style:none; }
+    .recipe-card summary { display:flex; align-items:center; gap:1rem; min-height:122px; padding:1.25rem; cursor:pointer; list-style:none; }
     .recipe-card summary::-webkit-details-marker { display:none; }
     .recipe-card summary:focus-visible { outline:3px solid var(--green); outline-offset:-3px; }
     .recipe-card[open] summary { background:#eef5ef; }
     .recipe-name { flex:1; min-width:0; font-weight:700; overflow-wrap:anywhere; }
     .recipe-name small { display:block; color:#5d6b60; font-weight:400; font-size:.8rem; margin-top:.25rem; }
-    .grade-image { width:90px; height:auto; flex:none; }
+    .grade-image { width:104px; height:auto; flex:none; }
     .expand { font-size:1.5rem; color:var(--green); line-height:1; }
     .recipe-card[open] .expand { transform:rotate(90deg); }
     .recipe-detail { border-top:1px solid var(--line); padding:1rem; }
@@ -32,6 +32,7 @@
     .score-0 { background:#a66d00; color:white; }
     .score-other { background:#edf0ec; color:#526056; }
     .legend { display:flex; flex-wrap:wrap; gap:.4rem; }
+    @media (max-width:400px) { .recipe-card summary { gap:.65rem; padding:1rem; } .grade-image { width:88px; } }
     @media (min-width:768px) { .toolbar { display:grid; grid-template-columns:1fr 220px; gap:1rem; align-items:end; } }
   </style>
 </head>
@@ -87,13 +88,13 @@
     }
     function recipeCard(item){
       const col=element("div","col-12 col-md-6");
-      const card=element("details","recipe-card h-100");
+      const card=element("details","recipe-card");
       const summary=element("summary");
       const title=element("span","recipe-name",item.name||"Recette sans nom");
       title.append(element("small","",seasonSummary(item)));
       summary.append(title);
       const grade=item.seasonality.grade;
-      if(grade&&/^[ABCDE]$/.test(grade)){const image=element("img","grade-image");image.src=`/img/${grade}.png`;image.alt=`Season-score ${grade}`;image.width=90;image.height=47;summary.append(image);}
+      if(grade&&/^[ABCDE]$/.test(grade)){const image=element("img","grade-image");image.src=`/img/${grade}.png`;image.alt=`Season-score ${grade}`;image.width=104;image.height=54;summary.append(image);}
       summary.append(element("span","expand","›"));
       const detail=element("div","recipe-detail text-muted small","Chargement des ingrédients…");
       card.append(summary,detail);
