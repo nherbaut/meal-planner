@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException, Request
 
@@ -28,7 +28,7 @@ class DraftTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         app_module._save_mealie_buffer([
-            {"name": "Soupe de courge", "slug": "soupe", "ingredients": ["courge"],
+            {"name": "Soupe de courge", "slug": "soupe", "id": "recipe-1", "image": "image-1", "ingredients": ["courge"],
              "ingredient_refs": [{"display": "courge", "food_id": "courge", "food_name": "courge"}]},
             {"name": "Salade de tomate", "slug": "salade", "ingredients": ["tomate"],
              "ingredient_refs": [{"display": "tomate", "food_id": "tomate", "food_name": "tomate"}]},
@@ -159,6 +159,62 @@ class DraftTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as error:
             app_module.mealie_catalog_recipes(13)
         self.assertEqual(error.exception.status_code, 400)
+
+    def test_saved_week_chooser_filters_grade_and_adds_recipe(self):
+        app_module._save_planning(MONDAY, [app_module._normalize_meal("lundi", "soir", {
+            "plats": ["Plat IA"], "ingredients": ["riz"], "restes": [],
+        })])
+        app_module._save_shopping_list(MONDAY, ["riz"], [])
+        request = Request({"type": "http", "headers": []})
+        page = app_module.choose_mealie_page(request, MONDAY, "lundi", "soir")
+        self.assertIn("Recettes avec un season-score A, B ou C", page.body.decode())
+        choices = json.loads(app_module.choose_mealie_options(MONDAY, "lundi", "soir").body)["recipes"]
+        self.assertEqual([item["slug"] for item in choices], ["soupe"])
+        self.assertEqual(choices[0]["image_url"], "/mealie/images/soupe")
+
+        class JsonRequest:
+            def __init__(self, slug):
+                self.slug = slug
+
+            async def json(self):
+                return {"day": "lundi", "repas": "soir", "slug": self.slug}
+
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(app_module.choose_mealie_recipe(JsonRequest("salade"), MONDAY))
+        self.assertEqual(error.exception.status_code, 400)
+        result = asyncio.run(app_module.choose_mealie_recipe(JsonRequest("soupe"), MONDAY))
+        self.assertEqual(result.status_code, 200)
+        saved = app_module._load_planning(MONDAY)[0]
+        self.assertIn("Soupe de courge", saved["plats"])
+        self.assertIn("courge", saved["ingredients"])
+        self.assertIn("courge", app_module._load_shopping_list(MONDAY)["to_buy"])
+        self.assertIn("image_url", json.loads(app_module.mealie_catalog_recipes(10).body)["recipes"][0])
+
+    def test_mealie_image_is_proxied_when_available(self):
+        upstream = Mock(status_code=200, content=b"webp-image", headers={"content-type": "image/webp"})
+        with patch.object(app_module, "MEALIE_URL", "https://mealie.example"), \
+             patch.object(app_module, "MEALIE_TOKEN", "token"), \
+             patch.object(app_module.requests, "get", return_value=upstream) as get:
+            response = app_module.mealie_image("soupe")
+        self.assertEqual(response.body, b"webp-image")
+        self.assertEqual(get.call_args.kwargs["params"], {"version": "image-1"})
+        self.assertIn("/api/media/recipes/recipe-1/images/min-original.webp", get.call_args.args[0])
+        with self.assertRaises(HTTPException) as error:
+            app_module.mealie_image("salade")
+        self.assertEqual(error.exception.status_code, 404)
+
+    def test_chooser_uses_actual_meal_month_and_rejects_locked_meal(self):
+        monday = "2026-10-26"
+        app_module._save_planning(monday, [
+            app_module._normalize_meal("dimanche", "soir", {"plats": ["Plat IA"], "ingredients": [], "restes": []}),
+            app_module._normalize_meal("mercredi", "soir", {"plats": ["Calendrier"], "ingredients": [], "restes": [], "mealie_plan_sync": True}),
+        ])
+        options = json.loads(app_module.choose_mealie_options(monday, "dimanche", "soir").body)
+        self.assertEqual(options["month"], 11)
+        self.assertEqual(options["recipes"], [])
+        with self.assertRaises(HTTPException) as error:
+            app_module.choose_mealie_options(monday, "mercredi", "soir")
+        self.assertEqual(error.exception.status_code, 409)
 
     def test_weekly_suggestions_only_include_grade_c_or_better(self):
         with patch.object(app_module, "_fetch_mealie_plan", return_value=[]):

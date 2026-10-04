@@ -22,6 +22,7 @@
     .ingredient-detail li { display:flex; justify-content:space-between; gap:.75rem; padding:.35rem 0; border-top:1px solid #edf1ec; font-size:.85rem; }
     .ingredient-detail li span:last-child { white-space:nowrap; font-weight:600; }
     .suggestion-panel { position:relative; overflow:hidden; border-radius:12px; }
+    .mealie-photo { display:block; width:100%; max-height:180px; margin:.4rem 0 .7rem; border-radius:12px; object-fit:cover; }
     .swipe-indicator { position:absolute; top:.35rem; right:.35rem; z-index:2; display:grid; place-items:center; width:44px; height:44px; border-radius:50%; background:#e5f3e9; color:var(--green); box-shadow:0 2px 10px #1c352326; font-size:2rem; line-height:1; opacity:0; transform:scale(.7); transition:opacity .12s ease,transform .12s ease; pointer-events:none; }
     .suggestion-panel.swiping .swipe-indicator { opacity:1; transform:scale(1); }
     .suggestion-panel.swiping .swipe-indicator span { animation:spin .8s linear infinite; }
@@ -78,6 +79,11 @@ function seasonBadge(item) {
   const label=s?.relevant===0 ? "Aucun ingrédient saisonnier à évaluer" : !s || s.score===null ? "Saison non évaluée" : `Season-score ${s.grade} · ${s.evaluated}/${s.relevant} ingrédients évalués`;
   wrap.append(node("span","score",label));
   return wrap;
+}
+function recipePhoto(item) {
+  if(!item?.image_url)return null;
+  const photo=node("img","mealie-photo");photo.src=item.image_url;photo.alt=`Photo de ${item.name||"la recette"}`;photo.loading="lazy";
+  photo.addEventListener("error",()=>photo.remove());return photo;
 }
 function ingredientLabel(item) {
   if(item.status==="neutral") return "Neutre";
@@ -137,8 +143,12 @@ function render() {
     if(fixed) card.append(node("span","badge text-bg-success mb-2","🔒 Calendrier Mealie"));
     else if(choice) card.append(node("span","badge text-bg-success mb-2","Recette Mealie choisie"));
     else if(generated) card.append(node("span","badge text-bg-secondary mb-2","Proposition IA · à relire"));
-    if(selected) {card.append(node("div","recipe-name mb-2",recipeLabel(selected))); if(selected.ingredients?.length) card.append(node("p","text-muted small mb-2",selected.ingredients.join(", ")));}
-    if(choice?.mealie_slug) {const item=data.suggestions[day]?.find(r=>r.slug===choice.mealie_slug); if(item) card.append(seasonBadge(item),ingredientDetail(day,item));}
+    if(selected) {
+      card.append(node("div","recipe-name mb-2",recipeLabel(selected)));
+      if(fixed)for(const dish of fixed.mealie_dishes||[]){const imageUrl=data.mealie_images?.[dish.slug];if(imageUrl){const photo=recipePhoto({image_url:imageUrl,name:dish.name});if(photo)card.append(photo);}}
+      if(selected.ingredients?.length) card.append(node("p","text-muted small mb-2",selected.ingredients.join(", ")));
+    }
+    if(choice?.mealie_slug) {const item=data.suggestions[day]?.find(r=>r.slug===choice.mealie_slug); if(item) {const photo=recipePhoto(item);if(photo)card.append(photo);card.append(seasonBadge(item),ingredientDetail(day,item));}}
     if(data.conflicts.includes(day)) card.append(node("p","text-danger small", "Conflit : retirez votre ancien choix pour garder le repas du calendrier Mealie."));
     if(fixed) {if(data.conflicts.includes(day)) card.append(button("Retirer mon ancien choix","btn-outline-danger w-100",()=>choose(day,null))); container.append(col); return;}
     const options=availableSuggestions(day);
@@ -148,6 +158,7 @@ function render() {
       panel.dataset.suggestionDay=day;
       panel.append(node("div","small text-muted mb-1","Suggestion Mealie · season-score C ou mieux"));
       panel.append(node("div","recipe-name",suggestion.name));
+      const photo=recipePhoto(suggestion);if(photo)panel.append(photo);
       panel.append(seasonBadge(suggestion),ingredientDetail(day,suggestion));
       panel.append(button("Ajouter cette recette","btn-outline-success w-100 mb-2",()=>choose(day,suggestion.slug)));
       if(options.length>1){

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Recettes Mealie · Season-score</title>
+  <title>{% if chooser %}Choisir une recette Mealie{% else %}Recettes Mealie · Season-score{% endif %}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     :root { --ink:#223027; --line:#dae5d9; --green:#276749; }
@@ -21,7 +21,9 @@
     .grade-image { width:104px; height:auto; flex:none; }
     .expand { font-size:1.5rem; color:var(--green); line-height:1; }
     .recipe-card[open] .expand { transform:rotate(90deg); }
+    .recipe-photo { width:76px; height:76px; flex:none; border-radius:12px; object-fit:cover; }
     .recipe-detail { border-top:1px solid var(--line); padding:1rem; }
+    .recipe-detail .btn { min-height:48px; }
     .ingredient-row { display:flex; justify-content:space-between; align-items:center; gap:.75rem; border-top:1px solid #e9eee7; padding:.65rem 0; }
     .ingredient-row:first-child { border-top:0; }
     .ingredient-name { min-width:0; overflow-wrap:anywhere; }
@@ -32,25 +34,33 @@
     .score-0 { background:#a66d00; color:white; }
     .score-other { background:#edf0ec; color:#526056; }
     .legend { display:flex; flex-wrap:wrap; gap:.4rem; }
-    @media (max-width:400px) { .recipe-card summary { gap:.65rem; padding:1rem; } .grade-image { width:88px; } }
+    @media (max-width:400px) { .recipe-card summary { gap:.65rem; padding:1rem; } .grade-image { width:78px; } .recipe-photo { width:56px; height:56px; } }
     @media (min-width:768px) { .toolbar { display:grid; grid-template-columns:1fr 220px; gap:1rem; align-items:end; } }
   </style>
 </head>
 <body>
   <main class="container shell py-3 py-lg-4">
     <header class="mb-4">
+      {% if chooser %}
+      <a class="small text-decoration-none fw-semibold" href="/meal-planning/{{ chooser.monday }}?day={{ chooser.day }}">← Revenir au planning</a>
+      <div class="small text-uppercase fw-semibold text-success mt-4 mb-1">{{ chooser.day|capitalize }} {{ chooser.date }} · {{ chooser.repas }}</div>
+      <h1 class="h2 mb-2">Choisir une recette Mealie</h1>
+      <p class="text-muted mb-0">Recettes avec un season-score A, B ou C pour ce repas. Ouvrez une recette pour voir le score de chaque ingrédient.</p>
+      {% else %}
       <a class="small text-decoration-none fw-semibold" href="/meal-planning/">← Toutes les semaines</a>
       <div class="small text-uppercase fw-semibold text-success mt-4 mb-1">Catalogue Mealie</div>
       <h1 class="h2 mb-2">Recettes et season-score</h1>
       <p class="text-muted mb-0">Choisissez un mois pour voir la saisonnalité des recettes et de chaque ingrédient.</p>
+      {% endif %}
     </header>
     <div class="toolbar mb-3">
       <div><label class="form-label fw-semibold" for="search">Rechercher une recette</label><input id="search" class="form-control" type="search" placeholder="Nom de la recette" autocomplete="off"></div>
+      {% if chooser %}<input id="month" type="hidden" value="{{ month }}">{% else %}
       <div><label class="form-label fw-semibold" for="month">Mois du repas</label><select id="month" class="form-select">
         <option value="1">Janvier</option><option value="2">Février</option><option value="3">Mars</option><option value="4">Avril</option>
         <option value="5">Mai</option><option value="6">Juin</option><option value="7">Juillet</option><option value="8">Août</option>
         <option value="9">Septembre</option><option value="10">Octobre</option><option value="11">Novembre</option><option value="12">Décembre</option>
-      </select></div>
+      </select></div>{% endif %}
     </div>
     <div class="legend mb-3" aria-label="Légende des scores d’ingrédients">
       <span class="score-chip score-2">2 · pleine saison</span>
@@ -62,12 +72,14 @@
     <div id="recipes" class="row g-3"></div>
   </main>
   <script>
+    const chooser={{ chooser|tojson }};
     const monthSelect=document.getElementById("month");
     const search=document.getElementById("search");
     const recipesEl=document.getElementById("recipes");
     const countEl=document.getElementById("count");
     const errorEl=document.getElementById("error");
     monthSelect.value=String({{ month|tojson }});
+    const planningUrl=chooser?`/meal-planning/${encodeURIComponent(chooser.monday)}`:null;
     let items=[];
     let loadSequence=0;
     function element(tag,className,value){const el=document.createElement(tag);if(className)el.className=className;if(value!==undefined)el.textContent=value;return el;}
@@ -90,6 +102,7 @@
       const col=element("div","col-12 col-md-6");
       const card=element("details","recipe-card");
       const summary=element("summary");
+      if(item.image_url){const photo=element("img","recipe-photo");photo.src=item.image_url;photo.alt="";photo.loading="lazy";photo.addEventListener("error",()=>photo.remove());summary.append(photo);}
       const title=element("span","recipe-name",item.name||"Recette sans nom");
       title.append(element("small","",seasonSummary(item)));
       summary.append(title);
@@ -105,8 +118,20 @@
           const data=await getJson(`/mealie/catalog/recipes/${encodeURIComponent(item.slug)}?month=${encodeURIComponent(monthSelect.value)}`);
           if(!card.isConnected)return;
           detail.replaceChildren();
-          if(!data.ingredients.length)detail.append(element("p","mb-0","Aucun ingrédient renseigné dans Mealie."));
+          if(!data.ingredients.length)detail.append(element("p","mb-2","Aucun ingrédient renseigné dans Mealie."));
           else data.ingredients.forEach(ingredient=>detail.append(ingredientRow(ingredient)));
+          if(chooser){
+            const add=element("button","btn btn-success w-100 mt-3","Ajouter cette recette");add.type="button";
+            add.addEventListener("click",async()=>{
+              add.disabled=true;errorEl.classList.add("d-none");
+              try{
+                const response=await fetch(`${planningUrl}/choose-mealie`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({day:chooser.day,repas:chooser.repas,slug:item.slug})});
+                if(!response.ok){let message=`Erreur ${response.status}`;try{message=(await response.json()).detail||message;}catch(_){}throw new Error(message);}
+                window.location.href=`${planningUrl}?day=${encodeURIComponent(chooser.day)}`;
+              }catch(error){errorEl.textContent=error.message;errorEl.classList.remove("d-none");add.disabled=false;errorEl.scrollIntoView({block:"nearest"});}
+            });
+            detail.append(add);
+          }
           loaded=true;
         }catch(error){detail.textContent=`Impossible de charger les ingrédients : ${error.message}`;}
       });
@@ -119,14 +144,15 @@
       const sequence=++loadSequence;
       recipesEl.replaceChildren();countEl.textContent="Chargement des recettes…";errorEl.classList.add("d-none");
       try{
-        const data=await getJson(`/mealie/catalog/recipes?month=${encodeURIComponent(monthSelect.value)}`);
+        const url=chooser?`${planningUrl}/choose-mealie/options?day=${encodeURIComponent(chooser.day)}&repas=${encodeURIComponent(chooser.repas)}`:`/mealie/catalog/recipes?month=${encodeURIComponent(monthSelect.value)}`;
+        const data=await getJson(url);
         if(sequence!==loadSequence)return;
         items=data.recipes;
         const fragment=document.createDocumentFragment();items.forEach(item=>fragment.append(recipeCard(item)));recipesEl.append(fragment);filter();
       }catch(error){if(sequence!==loadSequence)return;countEl.textContent="";errorEl.textContent=error.message;errorEl.classList.remove("d-none");}
     }
     search.addEventListener("input",filter);
-    monthSelect.addEventListener("change",()=>{history.replaceState(null,"",`/mealie/catalog?month=${encodeURIComponent(monthSelect.value)}`);loadCatalog();});
+    if(!chooser)monthSelect.addEventListener("change",()=>{history.replaceState(null,"",`/mealie/catalog?month=${encodeURIComponent(monthSelect.value)}`);loadCatalog();});
     loadCatalog();
   </script>
 </body>

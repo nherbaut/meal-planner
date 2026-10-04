@@ -12,9 +12,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -850,7 +851,7 @@ def _draft_payload(monday: str, draft: Dict[str, Any]) -> Dict[str, Any]:
     used_slugs.update(str(dish.get("slug")) for meal in draft.get("locked", []) for dish in meal.get("mealie_dishes", []) if isinstance(dish, dict) and dish.get("slug"))
     for offset, day in enumerate(WEEK_DAYS):
         month = (start + timedelta(days=offset)).month
-        ranked = [{"slug": recipe.get("slug"), "name": recipe.get("name"),
+        ranked = [{"slug": recipe.get("slug"), "name": recipe.get("name"), "image_url": _mealie_image_url(recipe),
                    "seasonality": seasonality.recipe_score(recipe, month, mapping)} for recipe in recipes]
         ranked = [item for item in ranked if item["seasonality"]["grade"] in {"A", "B", "C"}]
         ranked.sort(key=lambda item: (item["seasonality"]["score"] is None,
@@ -863,7 +864,10 @@ def _draft_payload(monday: str, draft: Dict[str, Any]) -> Dict[str, Any]:
             ranked.insert(0, first_unused)
             used_slugs.add(str(first_unused.get("slug")))
         suggestions[day] = ranked
-    return {"monday": monday, **draft, "conflicts": _draft_conflicts(draft), "suggestions": suggestions}
+    image_urls = {str(recipe["slug"]): url for recipe in recipes
+                  if recipe.get("slug") and (url := _mealie_image_url(recipe))}
+    return {"monday": monday, **draft, "conflicts": _draft_conflicts(draft),
+            "suggestions": suggestions, "mealie_images": image_urls}
 
 
 @app.get("/meal-planning/{monday}/draft")
@@ -1212,33 +1216,7 @@ async def regenerate_mealie(request: Request, monday: str):
     return JSONResponse(content={"meal": new_meal, "monday": monday})
 
 
-@app.post("/meal-planning/{monday}/add-mealie-dish")
-async def add_mealie_dish(request: Request, monday: str):
-    _validate_date_str(monday)
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-    day = (body.get("jour") or body.get("day") or "").strip().lower()
-    repas = (body.get("repas") or "soir").strip().lower()
-    slug = (body.get("slug") or "").strip()
-    name = (
-        body.get("name")
-        or body.get("recipe_name")
-        or body.get("recette")
-        or body.get("receipt")
-        or ""
-    )
-    name = str(name).strip()
-    if not day:
-        raise HTTPException(status_code=400, detail="Missing jour/day")
-    if not slug and not name:
-        raise HTTPException(status_code=400, detail="Missing recipe slug or name")
-
-    recipe = _lookup_mealie_recipe(slug=slug, name=name)
-    if not recipe:
-        raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
-
+def _add_mealie_recipe_to_planning(monday: str, day: str, repas: str, recipe: Dict[str, Any]) -> Dict[str, Any]:
     planning = _load_planning(monday)
     old_meal: Optional[Dict[str, Any]] = None
     new_meal: Dict[str, Any]
@@ -1263,6 +1241,61 @@ async def add_mealie_dish(request: Request, monday: str):
         _update_shopping_list_after_substitution(monday, old_meal, new_meal)
     except HTTPException:
         pass
+    return new_meal
+
+
+@app.post("/meal-planning/{monday}/add-mealie-dish")
+async def add_mealie_dish(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    day = (body.get("jour") or body.get("day") or "").strip().lower()
+    repas = (body.get("repas") or "soir").strip().lower()
+    slug = (body.get("slug") or "").strip()
+    name = (
+        body.get("name")
+        or body.get("recipe_name")
+        or body.get("recette")
+        or body.get("receipt")
+        or ""
+    )
+    name = str(name).strip()
+    if not day:
+        raise HTTPException(status_code=400, detail="Missing jour/day")
+    if not slug and not name:
+        raise HTTPException(status_code=400, detail="Missing recipe slug or name")
+    recipe = _lookup_mealie_recipe(slug=slug, name=name)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
+    new_meal = _add_mealie_recipe_to_planning(monday, day, repas, recipe)
+    return JSONResponse(content={"meal": new_meal, "monday": monday})
+
+
+@app.post("/meal-planning/{monday}/choose-mealie")
+async def choose_mealie_recipe(request: Request, monday: str):
+    _validate_date_str(monday)
+    try:
+        body = await request.json()
+    except Exception as error:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from error
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+    day = str(body.get("day") or "").strip().lower()
+    repas = str(body.get("repas") or "").strip().lower()
+    slug = str(body.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="Missing recipe slug")
+    _editable_planning_meal(monday, day, repas)
+    recipe = next((item for item in _catalog_recipes() if item.get("slug") == slug), None)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail="Recette Mealie introuvable")
+    planned_date = date.fromisoformat(monday) + timedelta(days=WEEK_DAYS.index(day))
+    grade = seasonality.recipe_score(recipe, planned_date.month, seasonality.load(SEASONALITY_FILE))["grade"]
+    if grade not in {"A", "B", "C"}:
+        raise HTTPException(status_code=400, detail="Cette recette n’a pas un season-score A, B ou C pour ce repas")
+    new_meal = _add_mealie_recipe_to_planning(monday, day, repas, recipe)
     return JSONResponse(content={"meal": new_meal, "monday": monday})
 
 
@@ -1334,27 +1367,39 @@ def _catalog_recipes() -> List[Dict[str, Any]]:
     return recipes
 
 
-@app.get("/mealie/catalog", response_class=HTMLResponse)
-def mealie_catalog(request: Request, month: Optional[int] = None):
-    selected_month = _catalog_month(month)
-    return templates.TemplateResponse(request, "mealie_catalog.html", {"month": selected_month})
+def _mealie_image_url(recipe: Dict[str, Any]) -> Optional[str]:
+    if recipe.get("id") and recipe.get("image") and recipe.get("slug"):
+        return f"/mealie/images/{quote(str(recipe['slug']), safe='')}"
+    return None
 
 
-@app.get("/mealie/catalog/recipes")
-def mealie_catalog_recipes(month: Optional[int] = None):
-    selected_month = _catalog_month(month)
+def _scored_mealie_recipes(month: int, allowed_grades: Optional[set[str]] = None) -> List[Dict[str, Any]]:
     mapping = seasonality.load(SEASONALITY_FILE)
     items = [
-        {"slug": recipe.get("slug"), "name": recipe.get("name"),
-         "seasonality": seasonality.recipe_score(recipe, selected_month, mapping)}
+        {"slug": recipe.get("slug"), "name": recipe.get("name"), "image_url": _mealie_image_url(recipe),
+         "seasonality": seasonality.recipe_score(recipe, month, mapping)}
         for recipe in _catalog_recipes()
     ]
+    if allowed_grades is not None:
+        items = [item for item in items if item["seasonality"]["grade"] in allowed_grades]
     items.sort(key=lambda item: (
         item["seasonality"]["score"] is None,
         -(item["seasonality"]["score"] or 0),
         str(item.get("name") or "").casefold(),
     ))
-    return JSONResponse(content={"month": selected_month, "recipes": items})
+    return items
+
+
+@app.get("/mealie/catalog", response_class=HTMLResponse)
+def mealie_catalog(request: Request, month: Optional[int] = None):
+    selected_month = _catalog_month(month)
+    return templates.TemplateResponse(request, "mealie_catalog.html", {"month": selected_month, "chooser": None})
+
+
+@app.get("/mealie/catalog/recipes")
+def mealie_catalog_recipes(month: Optional[int] = None):
+    selected_month = _catalog_month(month)
+    return JSONResponse(content={"month": selected_month, "recipes": _scored_mealie_recipes(selected_month)})
 
 
 @app.get("/mealie/catalog/recipes/{slug}")
@@ -1367,10 +1412,60 @@ def mealie_catalog_recipe(slug: str, month: Optional[int] = None):
     return JSONResponse(content={
         "slug": slug,
         "name": recipe.get("name"),
+        "image_url": _mealie_image_url(recipe),
         "month": selected_month,
         "seasonality": seasonality.recipe_score(recipe, selected_month, mapping),
         "ingredients": seasonality.ingredient_scores(recipe, selected_month, mapping),
     })
+
+
+def _editable_planning_meal(monday: str, day: str, repas: str) -> Dict[str, Any]:
+    if day not in WEEK_DAYS:
+        raise HTTPException(status_code=400, detail="Invalid day")
+    planning = _load_planning(monday)
+    meal = next((item for item in planning if item.get("jour") == day and item.get("repas") == repas), None)
+    if meal is None:
+        raise HTTPException(status_code=404, detail="Meal not found")
+    if meal.get("mealie_plan_sync"):
+        raise HTTPException(status_code=409, detail="Repas Mealie verrouillé")
+    return meal
+
+
+@app.get("/meal-planning/{monday}/choose-mealie", response_class=HTMLResponse)
+def choose_mealie_page(request: Request, monday: str, day: str, repas: str):
+    _validate_date_str(monday)
+    _editable_planning_meal(monday, day, repas)
+    planned_date = date.fromisoformat(monday) + timedelta(days=WEEK_DAYS.index(day))
+    chooser = {"monday": monday, "day": day, "repas": repas, "date": planned_date.isoformat()}
+    return templates.TemplateResponse(request, "mealie_catalog.html", {"month": planned_date.month, "chooser": chooser})
+
+
+@app.get("/meal-planning/{monday}/choose-mealie/options")
+def choose_mealie_options(monday: str, day: str, repas: str):
+    _validate_date_str(monday)
+    _editable_planning_meal(monday, day, repas)
+    planned_date = date.fromisoformat(monday) + timedelta(days=WEEK_DAYS.index(day))
+    return JSONResponse(content={"month": planned_date.month, "recipes": _scored_mealie_recipes(planned_date.month, {"A", "B", "C"})})
+
+
+@app.get("/mealie/images/{slug}")
+def mealie_image(slug: str):
+    recipe = next((item for item in _load_mealie_buffer() if item.get("slug") == slug), None)
+    if recipe is None or not _mealie_image_url(recipe) or not MEALIE_URL or not MEALIE_TOKEN:
+        raise HTTPException(status_code=404, detail="Image Mealie introuvable")
+    recipe_id = quote(str(recipe["id"]), safe="")
+    try:
+        upstream = requests.get(
+            f"{MEALIE_URL}/api/media/recipes/{recipe_id}/images/min-original.webp",
+            headers={"Authorization": f"Bearer {MEALIE_TOKEN}", "accept": "image/webp"},
+            params={"version": str(recipe["image"])}, timeout=20,
+        )
+    except requests.RequestException as error:
+        logger.warning("Failed to load Mealie image for %s: %s", slug, error)
+        raise HTTPException(status_code=502, detail="Image Mealie indisponible") from error
+    if upstream.status_code != 200 or not upstream.headers.get("content-type", "").startswith("image/"):
+        raise HTTPException(status_code=404, detail="Image Mealie introuvable")
+    return Response(content=upstream.content, media_type=upstream.headers["content-type"], headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.post("/meal-planning/{monday}/inject-mealie")
@@ -1503,7 +1598,7 @@ def _refresh_mealie_buffer() -> None:
     except ValueError:
         workers = 8
 
-    def build_entry(name: str, slug: str, total_time: Optional[str]) -> Optional[Dict[str, Any]]:
+    def build_entry(name: str, slug: str, total_time: Optional[str], recipe_id: Any, image_version: Any) -> Optional[Dict[str, Any]]:
         detail = _fetch_mealie_recipe_detail(slug) or {}
         ing = []
         ingredient_refs = []
@@ -1520,6 +1615,8 @@ def _refresh_mealie_buffer() -> None:
         return {
             "name": name,
             "slug": slug,
+            "id": str(detail.get("id") or recipe_id or ""),
+            "image": detail.get("image") or image_version,
             "ingredients": ing,
             "ingredient_refs": ingredient_refs,
             "duree_preparation_minutes": duree,
@@ -1547,7 +1644,7 @@ def _refresh_mealie_buffer() -> None:
                 if key in dedup or key in seen_in_page:
                     continue
                 seen_in_page.add(key)
-                futures.append(executor.submit(build_entry, name, slug, it.get("totalTime")))
+                futures.append(executor.submit(build_entry, name, slug, it.get("totalTime"), it.get("id"), it.get("image")))
             for fut in as_completed(futures):
                 try:
                     entry = fut.result()
@@ -1677,6 +1774,8 @@ def _mealie_planned_meals(monday: str, entries: List[Dict[str, Any]]) -> Dict[tu
             cached[slug] = {
                 "slug": slug,
                 "name": name,
+                "id": str(detail.get("id") or recipe.get("id") or ""),
+                "image": detail.get("image") or recipe.get("image"),
                 "ingredients": ingredients,
                 "ingredient_refs": ingredient_refs,
                 "duree_preparation_minutes": _parse_duration_minutes(detail.get("totalTime") or recipe.get("totalTime")),
